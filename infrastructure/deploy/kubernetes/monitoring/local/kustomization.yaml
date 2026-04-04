@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - redis-exporter.yaml
+  - prometheus.yaml
+  - grafana.yaml
+
+configMapGenerator:
+  - name: grafana-dashboard-orderbook
+    namespace: monitoring
+    files:
+      - dashboards/orderbook-k8s.json
+    options:
+      disableNameSuffixHash: true

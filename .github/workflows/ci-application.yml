@@ -83,25 +83,236 @@ jobs:
           cache-from: gha
           cache-to: gha
 
-#  deploy:
-#    name: Deploy via Terraform
-#    runs-on: ubuntu-latest
-#    needs: build-image
-#    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-#    steps:
-#      - uses: actions/checkout@v4
-#      - name: Generate terraform.tfvars from template
-#        working-directory: infrastructure/terraform/applications
-#        run: |
-#          cp terraform.tfvars.template terraform.tfvars
-#          sed -i "s|__ACR_LOGIN_SERVER__|${{ secrets.ACR_LOGIN_SERVER }}|g" terraform.tfvars
-#          sed -i "s|__ACR_ADMIN_USERNAME__|${{ secrets.ACR_USERNAME }}|g" terraform.tfvars
-#          sed -i "s|__ACR_ADMIN_PASSWORD__|${{ secrets.ACR_PASSWORD }}|g" terraform.tfvars
-#          sed -i "s|__API_IMAGE__|ghcr.io/${{ github.repository }}@${{ needs.build-image.outputs.digest }}|g" terraform.tfvars
-#      - uses: ./.github/workflows/actions/terraform
-#        with:
-#          working-directory: infrastructure/terraform/applications
-#          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-#          azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-#          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-#          tfvars-file: terraform.tfvars
+  # Deploy to production: Terraform (infra) then kustomize (app) with safe rollout.
+  #
+  # Prerequisites:
+  #   1. GitHub Environment "production" with required reviewers (manual approval gate).
+  #   2. AWS IAM Role with trust policy for GitHub OIDC provider:
+  #        - Principal: arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com
+  #        - Condition: sub = repo:<org>/<repo>:ref:refs/heads/main
+  #   3. Role permissions: EKS describe/update-kubeconfig, S3/DynamoDB for Terraform state.
+  #   4. Secret: AWS_DEPLOY_ROLE_ARN = arn:aws:iam::<account>:role/<deploy-role-name>
+  #
+  # Safety model:
+  #   - PRs: lint + test + security + build (no deploy).
+  #   - Push to main: build + deploy with manual approval gate.
+  #   - Image pinned by digest (immutable), not tag.
+  #   - Kubernetes rolling update: maxSurge=1, maxUnavailable=0 (zero-downtime).
+  #   - Readiness probe must pass before old pods are terminated.
+  #   - Post-deploy health check against /readyz and /healthz.
+  #   - Automatic rollback if rollout fails or health check returns non-200.
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs: build-image
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      EKS_CLUSTER: trading-production
+      AWS_REGION: us-east-1
+      NAMESPACE: trading
+      IMAGE_REF: "ghcr.io/${{ github.repository }}@${{ needs.build-image.outputs.digest }}"
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Phase 1: Infrastructure (Terraform) ---
+
+      - name: Generate terraform.tfvars
+        working-directory: infrastructure/terraform/environments/production
+        run: |
+          cat > deploy.tfvars <<EOF
+          orderbook_image = "${{ env.IMAGE_REF }}"
+          EOF
+
+      - uses: ./.github/workflows/actions/deploy
+        with:
+          working-directory: infrastructure/terraform/environments/production
+          aws-role-arn: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          tfvars-file: deploy.tfvars
+          plan-only: "false"
+
+      # --- Phase 2: Application (kustomize to EKS with safe rollout) ---
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER" \
+            --region "$AWS_REGION" \
+            --alias "$EKS_CLUSTER"
+          echo "Connected to EKS cluster:"
+          kubectl cluster-info
+
+      - name: Pin image digest in kustomize overlay
+        working-directory: infrastructure/deploy/kubernetes/overlays/production
+        run: |
+          # Replace the image reference with the exact digest from CI.
+          # Digests are immutable — tags are not.
+          kustomize edit set image "orderbook-service=$IMAGE_REF"
+          echo "Image pinned to: $IMAGE_REF"
+          kustomize build . | grep "image:" || true
+
+      - name: Pre-deploy snapshot
+        run: |
+          echo "=== Current deployment state ==="
+          kubectl get deployment/orderbook -n "$NAMESPACE" -o wide 2>/dev/null || echo "No existing deployment"
+          echo ""
+          echo "=== Current pods ==="
+          kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=orderbook -o wide 2>/dev/null || true
+
+      - name: Apply kustomize overlay
+        run: |
+          kubectl apply -k infrastructure/deploy/kubernetes/overlays/production \
+            --server-side --force-conflicts \
+            --field-manager=ci-deploy
+          echo "Kustomize applied."
+
+      - name: Wait for rollout
+        id: rollout
+        run: |
+          echo "Waiting for rolling update to complete..."
+          echo "Strategy: maxSurge=1, maxUnavailable=0 (zero-downtime)"
+          echo ""
+          if ! kubectl rollout status deployment/orderbook \
+            -n "$NAMESPACE" --timeout=300s; then
+            echo "::error::Rollout failed or timed out"
+            exit 1
+          fi
+          echo "All pods updated and ready."
+
+      - name: Verify readiness probe (/readyz)
+        id: readyz
+        run: |
+          echo "Checking readiness endpoint on all pods..."
+          PODS=$(kubectl get pods -n "$NAMESPACE" \
+            -l app.kubernetes.io/name=orderbook \
+            -o jsonpath='{.items[*].metadata.name}')
+
+          FAILED=0
+          for POD in $PODS; do
+            STATUS=$(kubectl exec -n "$NAMESPACE" "$POD" -- \
+              wget -q -O /dev/null -S http://localhost:8080/readyz 2>&1 \
+              | grep "HTTP/" | awk '{print $2}' || echo "000")
+
+            # Distroless has no wget/curl — use port-forward instead
+            if [ "$STATUS" = "000" ]; then
+              kubectl port-forward -n "$NAMESPACE" "$POD" 18080:8080 &
+              PF_PID=$!
+              sleep 2
+              STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+                --max-time 10 http://localhost:18080/readyz || echo "000")
+              kill $PF_PID 2>/dev/null || true
+              wait $PF_PID 2>/dev/null || true
+            fi
+
+            if [ "$STATUS" = "200" ]; then
+              echo "  $POD: /readyz OK (HTTP $STATUS)"
+            else
+              echo "::error::$POD: /readyz FAILED (HTTP $STATUS)"
+              FAILED=1
+            fi
+          done
+
+          if [ "$FAILED" = "1" ]; then
+            exit 1
+          fi
+          echo "All pods passed readiness check."
+
+      - name: Verify liveness probe (/healthz)
+        id: healthz
+        run: |
+          # Quick liveness check on the first pod to confirm the process is alive.
+          POD=$(kubectl get pods -n "$NAMESPACE" \
+            -l app.kubernetes.io/name=orderbook \
+            -o jsonpath='{.items[0].metadata.name}')
+
+          kubectl port-forward -n "$NAMESPACE" "$POD" 18081:8080 &
+          PF_PID=$!
+          sleep 2
+
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            --max-time 10 http://localhost:18081/healthz || echo "000")
+          kill $PF_PID 2>/dev/null || true
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Liveness check failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          echo "Liveness check passed (HTTP $HTTP_CODE)."
+
+      - name: Smoke test (place + cancel order)
+        id: smoke
+        run: |
+          POD=$(kubectl get pods -n "$NAMESPACE" \
+            -l app.kubernetes.io/name=orderbook \
+            -o jsonpath='{.items[0].metadata.name}')
+
+          kubectl port-forward -n "$NAMESPACE" "$POD" 18082:8080 &
+          PF_PID=$!
+          sleep 2
+
+          # Place an order and verify 201
+          RESP=$(curl -s -w '\n%{http_code}' --max-time 10 \
+            -X POST http://localhost:18082/api/v1/orders \
+            -H "Content-Type: application/json" \
+            -d '{"pair":"SMOKE-TEST","side":"buy","price":1.0,"quantity":1.0}')
+          HTTP_CODE=$(echo "$RESP" | tail -1)
+          BODY=$(echo "$RESP" | head -1)
+
+          if [ "$HTTP_CODE" != "201" ]; then
+            echo "::error::Smoke test: POST /orders returned HTTP $HTTP_CODE"
+            kill $PF_PID 2>/dev/null || true
+            exit 1
+          fi
+
+          # Extract order ID and cancel it (cleanup)
+          ORDER_ID=$(echo "$BODY" | jq -r '.data.order.id // empty')
+          if [ -n "$ORDER_ID" ]; then
+            curl -s -o /dev/null --max-time 10 \
+              -X DELETE "http://localhost:18082/api/v1/orders/${ORDER_ID}?pair=SMOKE-TEST"
+          fi
+
+          kill $PF_PID 2>/dev/null || true
+          echo "Smoke test passed: order placed (201) and cancelled."
+
+      # --- Rollback on any failure ---
+
+      - name: Rollback on failure
+        if: failure() && (steps.rollout.outcome == 'failure' || steps.readyz.outcome == 'failure' || steps.healthz.outcome == 'failure' || steps.smoke.outcome == 'failure')
+        run: |
+          echo "::warning::Deploy verification failed — rolling back to previous revision"
+          kubectl rollout undo deployment/orderbook -n "$NAMESPACE"
+          kubectl rollout status deployment/orderbook -n "$NAMESPACE" --timeout=120s
+          echo ""
+          echo "Rollback complete. Current pods:"
+          kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=orderbook -o wide
+          echo ""
+          echo "::error::Deploy rolled back. Investigate the failure before retrying."
+
+      # --- Summary ---
+
+      - name: Deploy summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy Summary"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| **Cluster** | \`$EKS_CLUSTER\` |"
+            echo "| **Namespace** | \`$NAMESPACE\` |"
+            echo "| **Image** | \`$IMAGE_REF\` |"
+            echo "| **Rollout** | ${{ steps.rollout.outcome || 'skipped' }} |"
+            echo "| **Readiness** | ${{ steps.readyz.outcome || 'skipped' }} |"
+            echo "| **Liveness** | ${{ steps.healthz.outcome || 'skipped' }} |"
+            echo "| **Smoke test** | ${{ steps.smoke.outcome || 'skipped' }} |"
+            echo ""
+            echo "#### Pod Status"
+            echo '```'
+            kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=orderbook \
+              -o wide 2>/dev/null || echo "(unable to fetch)"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY

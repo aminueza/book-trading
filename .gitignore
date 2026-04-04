@@ -4,6 +4,7 @@
 
 # Go
 /vendor/
+coverage.out
 
 # Terraform
 .terraform/
@@ -12,6 +13,8 @@
 *.tfvars
 !*.tfvars.example
 .terraform.lock.hcl
+kubeconfig.yaml
+trade-config
 
 # IDE
 .idea/

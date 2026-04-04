@@ -1,0 +1,208 @@
+name: "Terraform Deploy"
+description: "Reusable Terraform workflow with AWS OIDC federated identity"
+
+inputs:
+  working-directory:
+    description: "Path to Terraform configuration"
+    required: true
+  terraform-version:
+    description: "Terraform version to use"
+    required: false
+    default: "1.14.3"
+  aws-role-arn:
+    description: "AWS IAM Role ARN to assume via OIDC"
+    required: true
+  aws-region:
+    description: "AWS Region"
+    required: true
+    default: "us-east-1"
+  plan-only:
+    description: "Run plan only without apply"
+    required: false
+    default: "false"
+  tfvars-file:
+    description: "Path to tfvars file (relative to working-directory)"
+    required: false
+    default: ""
+  backend-config:
+    description: "Backend configuration (key=value format, one per line)"
+    required: false
+    default: ""
+  additional-args:
+    description: "Additional Terraform arguments"
+    required: false
+    default: ""
+  auto-approve:
+    description: "Auto-approve apply without confirmation"
+    required: false
+    default: "true"
+
+outputs:
+  plan-exitcode:
+    description: "Exit code from terraform plan (0=no changes, 2=changes)"
+    value: ${{ steps.plan.outputs.exitcode }}
+  apply-exitcode:
+    description: "Exit code from terraform apply"
+    value: ${{ steps.apply.outputs.exitcode }}
+  outputs-json:
+    description: "Terraform outputs as JSON"
+    value: ${{ steps.outputs.outputs.json }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: "Install Dependencies (Self-hosted Runner)"
+      shell: bash
+      run: |
+        echo "Checking and installing required tools..."
+
+        PACKAGES_TO_INSTALL=""
+
+        # Check for required tools
+        command -v unzip &> /dev/null || PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL unzip"
+        command -v curl &> /dev/null || PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL curl"
+        command -v jq &> /dev/null || PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL jq"
+
+        # Install missing packages
+        if [ -n "$PACKAGES_TO_INSTALL" ]; then
+          echo "Installing: $PACKAGES_TO_INSTALL"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq $PACKAGES_TO_INSTALL
+        fi
+
+        # Install AWS CLI if not present
+        if ! command -v aws &> /dev/null; then
+          echo "Installing AWS CLI..."
+          curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install
+          rm -rf /tmp/awscliv2.zip /tmp/aws
+        fi
+
+        echo "All dependencies installed"
+        echo "AWS CLI version: $(aws --version 2>/dev/null || echo 'installed')"
+
+    - name: "Setup Terraform"
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false
+
+    - name: "AWS Login (OIDC)"
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: "Terraform Format Check"
+      id: fmt
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: terraform fmt -check -recursive
+      continue-on-error: true
+
+    - name: "Terraform Init"
+      id: init
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BACKEND_CONFIG: ${{ inputs.backend-config }}
+      run: |
+        INIT_ARGS=""
+        if [ -n "$BACKEND_CONFIG" ]; then
+          while IFS= read -r line; do
+            [ -n "$line" ] && INIT_ARGS="$INIT_ARGS -backend-config=$line"
+          done <<< "$BACKEND_CONFIG"
+        fi
+        terraform init $INIT_ARGS
+
+    - name: "Terraform Validate"
+      id: validate
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: terraform validate -no-color
+
+    - name: "Terraform Plan"
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TFVARS_FILE: ${{ inputs.tfvars-file }}
+        ADDITIONAL_ARGS: ${{ inputs.additional-args }}
+      run: |
+        PLAN_ARGS="-out=tfplan -detailed-exitcode"
+        [ -n "$TFVARS_FILE" ] && PLAN_ARGS="$PLAN_ARGS -var-file=$TFVARS_FILE"
+        [ -n "$ADDITIONAL_ARGS" ] && PLAN_ARGS="$PLAN_ARGS $ADDITIONAL_ARGS"
+
+        set +e
+        terraform plan $PLAN_ARGS
+        EXITCODE=$?
+        set -e
+
+        echo "exitcode=$EXITCODE" >> $GITHUB_OUTPUT
+
+        # Exit code 2 means changes detected (not an error)
+        if [ $EXITCODE -eq 1 ]; then
+          exit 1
+        fi
+
+    - name: "Terraform Apply"
+      id: apply
+      if: ${{ inputs.plan-only == 'false' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        AUTO_APPROVE: ${{ inputs.auto-approve }}
+      run: |
+        APPLY_ARGS=""
+        [ "$AUTO_APPROVE" == "true" ] && APPLY_ARGS="-auto-approve"
+
+        terraform apply $APPLY_ARGS tfplan
+        echo "exitcode=$?" >> $GITHUB_OUTPUT
+
+    - name: "Terraform Outputs"
+      id: outputs
+      if: ${{ inputs.plan-only == 'false' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        # Use heredoc for multi-line JSON output (skipping sensitive values)
+        {
+          echo "json<<EOF"
+          terraform output -json -no-color 2>/dev/null | jq 'with_entries(select(.value.sensitive != true))' || echo '{}'
+          echo "EOF"
+        } >> $GITHUB_OUTPUT
+
+    - name: "Generate Summary"
+      shell: bash
+      env:
+        FMT_OUTCOME: ${{ steps.fmt.outcome }}
+        INIT_OUTCOME: ${{ steps.init.outcome }}
+        VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+        PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        APPLY_OUTCOME: ${{ steps.apply.outcome }}
+        WORKING_DIR: ${{ inputs.working-directory }}
+        PLAN_ONLY: ${{ inputs.plan-only }}
+      run: |
+        {
+          echo "### Terraform Deployment Summary"
+          echo ""
+          echo "| Step | Status |"
+          echo "|------|--------|"
+          echo "| Working Directory | \`$WORKING_DIR\` |"
+          echo "| Format Check | $([[ "$FMT_OUTCOME" == "success" ]] && echo "Passed" || echo "Issues found") |"
+          echo "| Init | $([[ "$INIT_OUTCOME" == "success" ]] && echo "Success" || echo "Failed") |"
+          echo "| Validate | $([[ "$VALIDATE_OUTCOME" == "success" ]] && echo "Valid" || echo "Invalid") |"
+
+          case "$PLAN_EXITCODE" in
+            0) echo "| Plan | No changes |" ;;
+            2) echo "| Plan | Changes detected |" ;;
+            *) echo "| Plan | Failed |" ;;
+          esac
+
+          if [ "$PLAN_ONLY" == "false" ]; then
+            echo "| Apply | $([[ "$APPLY_OUTCOME" == "success" ]] && echo "Applied" || echo "Skipped") |"
+          else
+            echo "| Apply | Plan only mode |"
+          fi
+        } >> $GITHUB_STEP_SUMMARY

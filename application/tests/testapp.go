@@ -3,16 +3,18 @@ package tests
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	"github.com/rs/zerolog"
 	otelmux "go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
 
-	"orderbook-service/application/internal/handler"
-	"orderbook-service/application/internal/health"
-	"orderbook-service/application/internal/middleware"
-	"orderbook-service/application/internal/orderbook"
+	"book-trading/application/internal/handler"
+	"book-trading/application/internal/health"
+	"book-trading/application/internal/middleware"
+	"book-trading/application/internal/orderbook"
+	"book-trading/application/internal/persistence"
 
 	miniredis "github.com/alicebob/miniredis/v2"
 )
@@ -31,7 +33,8 @@ func testRouter(t *testing.T) (http.Handler, *miniredis.Miniredis, *redis.Client
 	}
 
 	engine := orderbook.NewEngine()
-	h := handler.New(engine, rdb)
+	store := persistence.NewRedisStore(rdb)
+	h := handler.New(engine, rdb, 100*time.Millisecond, store)
 	hc := health.NewChecker(rdb)
 
 	r := mux.NewRouter()

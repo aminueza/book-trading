@@ -1,3 +1,40 @@
+# Deployment for the order book service.
+#
+# Key design decisions:
+#
+# 1. Rolling update strategy with maxSurge=1, maxUnavailable=0:
+#    Ensures zero-downtime deploys. New pods must pass readiness before old
+#    pods are terminated. Slower than maxUnavailable=1 but safer for a
+#    trading system where availability is paramount.
+#
+# 2. Pod anti-affinity (preferredDuringScheduling):
+#    Spreads replicas across nodes to survive node failures. Using "preferred"
+#    rather than "required" so scheduling still works in a degraded cluster.
+#
+# 3. Topology spread constraints:
+#    Distributes pods across availability zones for zone failure resilience.
+#
+# 4. Resource requests = limits for CPU:
+#    In latency-sensitive systems, CPU throttling from exceeding limits causes
+#    unpredictable tail latencies. Setting request=limit puts the pod in the
+#    "Guaranteed" QoS class, which gets priority during node pressure and
+#    avoids CFS throttling surprises.
+#
+# 5. Security context:
+#    Non-root, read-only filesystem, no privilege escalation, dropped
+#    capabilities. The pod runs with the absolute minimum privileges needed.
+#
+# Failure modes considered:
+#   - Node failure: Anti-affinity + PDB ensures remaining replicas serve traffic.
+#   - Bad deploy: Readiness probe + minReadySeconds catches startup crashes.
+#   - Memory leak: Memory limit triggers OOMKill; restart policy handles recovery.
+#   - Dependency failure (Redis): Service operates degraded; readiness stays up.
+#
+# Failure modes intentionally out of scope:
+#   - Split-brain during network partition (requires consensus protocol).
+#   - Data durability (in-memory order book; production would use WAL + replication).
+#   - Multi-region failover (see docs/hybrid-migration.md).
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,7 +63,11 @@ spec:
         app.kubernetes.io/name: orderbook
         app.kubernetes.io/component: api
       annotations:
-        checksum/config: "PLACEHOLDER"
+        # In CI/CD, replace this with the actual ConfigMap sha256 to trigger
+        # rolling restarts on config changes (e.g., via kustomize configMapGenerator
+        # with hash suffix, or a pipeline step that patches the annotation).
+        checksum/config: "generate-at-deploy-time"
+        # Prometheus scrape configuration.
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
         prometheus.io/path: "/metrics"
@@ -59,7 +100,7 @@ spec:
 
       containers:
         - name: orderbook
-          image: orderbook-service:latest
+          image: orderbook-service:latest  # Overridden by kustomize overlay
           imagePullPolicy: IfNotPresent
 
           ports:
@@ -89,6 +130,8 @@ spec:
               cpu: 500m
               memory: 256Mi
 
+          # Liveness probe: Is the process alive?
+          # Conservative settings — false positives here cause unnecessary restarts.
           livenessProbe:
             httpGet:
               path: /healthz
@@ -98,6 +141,9 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 3
 
+          # Readiness probe: Can this pod serve traffic?
+          # More aggressive than liveness — we want to remove unhealthy pods
+          # from the load balancer quickly.
           readinessProbe:
             httpGet:
               path: /readyz
@@ -107,6 +153,8 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 2
 
+          # Startup probe: Gives the container time to initialize.
+          # Prevents liveness from killing slow-starting pods.
           startupProbe:
             httpGet:
               path: /healthz
@@ -122,6 +170,7 @@ spec:
               drop:
                 - ALL
 
+      # Prefer spreading across nodes but don't block scheduling.
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
