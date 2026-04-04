@@ -90,7 +90,7 @@ func getBoolEnv(key string, fallback bool) bool {
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
-		fmt.Fprintln(os.Stdout, version)
+		_, _ = fmt.Fprintln(os.Stdout, version)
 		os.Exit(0)
 	}
 

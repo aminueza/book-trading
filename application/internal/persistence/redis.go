@@ -46,7 +46,9 @@ func (s *RedisStore) RecordPlace(ctx context.Context, pair string, primary *orde
 		"ts":      time.Now().UTC(),
 		"updated": touched,
 	}
-	s.appendJournal(ctx, entry)
+	if err := s.appendJournal(ctx, entry); err != nil {
+		log.Debug().Err(err).Msg("persist journal append")
+	}
 
 	for _, o := range touched {
 		if o == nil {
