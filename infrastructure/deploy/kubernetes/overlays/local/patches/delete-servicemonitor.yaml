@@ -1,3 +1,4 @@
+# Prometheus Operator CRDs are not installed on the local kind cluster.
 $patch: delete
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

@@ -6,12 +6,15 @@ namespace: trading
 resources:
   - ../../base
 
+# Production image — pinned to a specific digest in real deployments.
 images:
   - name: orderbook-service
     newName: registry.internal/trading/orderbook-service
     newTag: "v1.0.0"
 
+# Production-specific patches.
 patches:
+  # Scale up for production traffic.
   - target:
       kind: Deployment
       name: orderbook
@@ -32,6 +35,7 @@ patches:
         path: /spec/template/spec/containers/0/resources/limits/memory
         value: "512Mi"
 
+  # Tighter HPA for production.
   - target:
       kind: HorizontalPodAutoscaler
       name: orderbook
@@ -43,6 +47,7 @@ patches:
         path: /spec/maxReplicas
         value: 20
 
+  # Higher PDB for production.
   - target:
       kind: PodDisruptionBudget
       name: orderbook

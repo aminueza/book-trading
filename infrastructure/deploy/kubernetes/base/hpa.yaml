@@ -1,3 +1,18 @@
+# HorizontalPodAutoscaler scales based on CPU utilization.
+#
+# Design decisions:
+#   - Min 3 replicas: Ensures HA even during low traffic.
+#   - Max 10 replicas: Caps cost and prevents runaway scaling from
+#     feedback loops (e.g., a retry storm that generates more load
+#     as we scale up).
+#   - Target 70% CPU: Leaves headroom for traffic spikes. At 70% average,
+#     individual pods may be at 90% due to uneven load distribution.
+#   - Scale-down stabilization (300s): Prevents flapping during
+#     intermittent load patterns. Trading traffic is often bursty.
+#
+# In production, we would also scale on custom metrics:
+#   - http_requests_in_flight (better proxy for saturation)
+#   - p99 latency (scale before users notice degradation)
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

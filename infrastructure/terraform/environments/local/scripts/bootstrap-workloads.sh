@@ -8,6 +8,10 @@ ISTIO_VER="${2:?istio chart version required}"
 REDIS_CHART_VER="${3:?redis chart version required}"
 OVERLAY_DIR="${4:?overlay dir required}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
+MONITORING_DIR="${REPO_ROOT}/infrastructure/deploy/kubernetes/monitoring/local"
+
 export KUBECONFIG="$KUBECONFIG_PATH"
 
 for cmd in helm kubectl; do
@@ -57,10 +61,14 @@ helm upgrade --install istio-ingressgateway gateway \
   "${GATEWAY_SCHEMA_FLAGS[@]}"
 
 echo "[redis] Bitnami Redis standalone, no auth, no PVC (chart ${REDIS_CHART_VER})"
+# docker.io/bitnami/* often hits Hub rate limits or policy; bitnamilegacy/redis keeps the same
+# entrypoint/layout the chart expects and usually pulls without extra registry auth (local KinD).
 helm upgrade --install redis redis \
   --namespace trading --create-namespace \
   --version "${REDIS_CHART_VER}" \
   --repo https://charts.bitnami.com/bitnami \
+  --set image.registry=docker.io \
+  --set image.repository=bitnamilegacy/redis \
   --set architecture=standalone \
   --set auth.enabled=false \
   --set master.persistence.enabled=false \
@@ -85,4 +93,15 @@ echo "[orderbook] kubectl apply -k ${OVERLAY_DIR}"
 kubectl apply -k "${OVERLAY_DIR}"
 kubectl rollout status deployment/orderbook -n trading --timeout=300s
 
+echo "[monitoring] Prometheus + Grafana (kubectl apply -k ${MONITORING_DIR})"
+kubectl delete deployment,service redis-exporter -n monitoring --ignore-not-found 2>/dev/null || true
+kubectl apply -k "${MONITORING_DIR}"
+kubectl rollout status deployment/redis-exporter -n trading --timeout=120s
+kubectl rollout status deployment/prometheus -n monitoring --timeout=120s
+kubectl rollout status deployment/grafana -n monitoring --timeout=120s
+
+echo ""
+echo "Local URLs (KinD extraPortMappings):"
+echo "  Orderbook API: http://127.0.0.1:8001/healthz"
+echo "  Grafana:       http://127.0.0.1:3000  (anonymous Admin; login admin/admin)"
 echo "done."

@@ -1,3 +1,4 @@
+# Single-node kind: one replica; image is loaded into the node via `kind load docker-image`.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

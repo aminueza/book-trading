@@ -8,3 +8,7 @@ data:
   METRICS_PORT: "9090"
   REDIS_ADDR: "redis-master.trading.svc.cluster.local:6379"
   LOG_LEVEL: "info"
+  # Optional: Go duration for Redis cache of GET /orderbook/{pair} JSON (default 100ms in code).
+  ORDERBOOK_SNAPSHOT_CACHE_TTL: "100ms"
+  # Load open/partial orders from Redis at startup. Keep false with multiple replicas (each would duplicate book state).
+  ORDERBOOK_REDIS_RECOVER: "false"

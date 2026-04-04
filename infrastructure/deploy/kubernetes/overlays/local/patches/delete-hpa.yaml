@@ -1,3 +1,4 @@
+# metrics-server is optional for local; run a fixed replica count instead.
 $patch: delete
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler

@@ -39,6 +39,7 @@ patches:
         path: /spec/maxReplicas
         value: 4
 
+  # namePrefix renames Gateway/Service metadata but not Istio spec references.
   - target:
       kind: VirtualService
       name: orderbook

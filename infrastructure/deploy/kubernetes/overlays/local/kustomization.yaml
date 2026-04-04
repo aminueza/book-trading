@@ -12,8 +12,17 @@ images:
     newTag: latest
 
 patches:
+  - path: patches/configmap-local.yaml
   - path: patches/namespace-local.yaml
   - path: patches/deployment-local.yaml
   - path: patches/pdb-local.yaml
   - path: patches/delete-servicemonitor.yaml
   - path: patches/delete-hpa.yaml
+  - path: patches/service-local.yaml
+  - path: patches/istio-virtualservice-local.yaml
+  - path: patches/networkpolicy-nodeport.json
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: NetworkPolicy
+      name: orderbook

@@ -1,3 +1,10 @@
+# PodDisruptionBudget prevents voluntary disruptions (node drains, cluster
+# upgrades) from taking down more than one pod at a time. With 3 replicas
+# and minAvailable=2, we guarantee at least 2 pods serving traffic during
+# maintenance windows.
+#
+# This does NOT protect against involuntary disruptions (node crashes, OOM).
+# Those are handled by the Deployment's replica count and pod anti-affinity.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

@@ -1,0 +1,10 @@
+# Longer snapshot TTL so Redis shows orderbook:* keys and Grafana Redis panels move during demos.
+# Production/staging keep the binary default (100ms) unless this key is set.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orderbook-config
+  namespace: trading
+data:
+  ORDERBOOK_SNAPSHOT_CACHE_TTL: "30s"
+  ORDERBOOK_REDIS_RECOVER: "true"

@@ -4,6 +4,8 @@ metadata:
   name: trading
   labels:
     app.kubernetes.io/part-of: trading-platform
+    # Pod Security Standards: restricted profile enforces best practices
+    # (no root, no privilege escalation, read-only rootfs, etc.)
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted

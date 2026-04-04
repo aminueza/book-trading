@@ -1,3 +1,4 @@
+# Bitnami Redis and quick local iteration are easier under baseline than restricted.
 apiVersion: v1
 kind: Namespace
 metadata:

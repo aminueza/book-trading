@@ -1,0 +1,14 @@
+[
+  {
+    "op": "add",
+    "path": "/spec/ingress/-",
+    "value": {
+      "ports": [
+        {
+          "port": 8080,
+          "protocol": "TCP"
+        }
+      ]
+    }
+  }
+]

@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
-# Optional: VALIDATE_LOAD_REQUESTS, VALIDATE_LOAD_PARALLEL, VALIDATE_LATENCY_SAMPLES, METRICS_URL,
-# VALIDATE_PAIR_MATCH, VALIDATE_PAIR_CANCEL. Usage: validate.sh [base_url] [--no-load] [--load-only]
+# validate.sh — Correctness checks + optional load generation for metrics/traces/dashboards.
+#
+# Usage:
+#   ./scripts/validate.sh [base_url] [--no-load] [--load-only]
+#
+# Default base_url: http://localhost:8080
+#
+# Environment (load phase):
+#   VALIDATE_LOAD_REQUESTS   Total HTTP requests to fire (default: 8000)
+#   VALIDATE_LOAD_PARALLEL   Max concurrent in-flight requests (default: 40)
+#   VALIDATE_LATENCY_SAMPLES Serial samples for latency report (default: 200)
+#   METRICS_URL              Prometheus scrape URL (default: derived from host + :9090/metrics)
+#
+# Correctness uses isolated pair names (default VAL-<pid>-MATCH / VAL-<pid>-CANCEL) so a
+# persistent Redis volume does not leave extra BTC-USD liquidity from earlier runs.
+# Override with VALIDATE_PAIR_MATCH and VALIDATE_PAIR_CANCEL if needed.
+#
+# After load, open Grafana (Docker Compose folder) and Prometheus; Explore → Tempo for traces.
+# Prometheus histograms need a short window of traffic — use a 5–15m time range in Grafana.
 
 set -euo pipefail
 
@@ -20,14 +37,17 @@ for arg in "$@"; do
   esac
 done
 
+# Subshells (metrics URL, xargs workers) need BASE_URL in the environment.
 export BASE_URL
 
+# Fresh symbol names per process — avoids flaky "remaining ask" when Redis still holds BTC-USD state.
 PAIR_MATCH="${VALIDATE_PAIR_MATCH:-VAL-$$-MATCH}"
 PAIR_CANCEL="${VALIDATE_PAIR_CANCEL:-VAL-$$-CANCEL}"
 
 PASS=0
 FAIL=0
 
+# Avoid `((PASS++))` under `set -e` (exit status 1 when expression is 0).
 check() {
   local name="$1"
   local expected="$2"
@@ -60,6 +80,7 @@ derive_metrics_url() {
 
 METRICS_URL="$(derive_metrics_url)"
 
+# --- Single request for load generator (index drives path mix) ---
 fire_request() {
   local i="$1"
   local mod=$((i % 6))
@@ -85,6 +106,7 @@ fire_request() {
         "${BASE_URL}/readyz" || true
       ;;
     5)
+      # Light write load — unique-ish price keeps matching engine busy; may 4xx if duplicate id — ignore
       local p=$((3000 + (i % 200)))
       curl -sS -o /dev/null --connect-timeout 2 --max-time 10 \
         -X POST "${BASE_URL}/api/v1/orders" \
@@ -109,6 +131,7 @@ run_load_phase() {
   local start
   start=$(date +%s)
 
+  # macOS ships a POSIX xargs; -P is supported on BSD/GNU xargs used on Mac/Linux CI
   seq 1 "$total" | xargs -P "$parallel" -n 1 bash -c 'fire_request "$1"' _ || true
 
   local elapsed=$(( $(date +%s) - start ))
@@ -154,6 +177,9 @@ print(f'  samples={len(xs)}  min={xs[0]*1000:.2f}ms  p50={pct(0.50)*1000:.2f}ms 
 
 export -f fire_request
 
+# ---------------------------------------------------------------------------
+# Correctness
+# ---------------------------------------------------------------------------
 if [ "$DO_CORRECTNESS" = true ]; then
   echo "=== Validating order book service at ${BASE_URL} ==="
   echo ""
@@ -188,6 +214,7 @@ if [ "$DO_CORRECTNESS" = true ]; then
   BOOK_SUCCESS=$(echo "$BOOK_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['success'])" 2>/dev/null || echo "false")
   check "Get order book" "True" "$BOOK_SUCCESS"
 
+  # JSON may emit quantity as 1 (int) or 1.0 (float); normalize for string check.
   ASK_QTY=$(echo "$BOOK_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin)['data']; q=float(d['asks'][0]['quantity']) if d.get('asks') else 0.0; print(q)" 2>/dev/null || echo "0")
   check "Remaining ask quantity" "1.0" "$ASK_QTY"
 

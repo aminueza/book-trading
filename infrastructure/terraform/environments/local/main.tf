@@ -1,7 +1,14 @@
+# Local Kubernetes: KinD + Istio (Helm) + Redis (Helm) + orderbook (kustomize).
+#
+# Prerequisites: Docker, kind (CLI), kubectl, Helm 3, Terraform 1.7+.
+# From repo root: docker build -t orderbook-service:latest .
+# Then: cd infrastructure/terraform/environments/local && tofu init && tofu apply
+
 locals {
-  repo_root   = abspath("${path.module}/../../..")
-  overlay_dir = "${local.repo_root}/deploy/kubernetes/overlays/local"
-  script_path = abspath("${path.module}/scripts/bootstrap-workloads.sh")
+  repo_root      = abspath("${path.module}/../../../..")
+  overlay_dir    = "${local.repo_root}/infrastructure/deploy/kubernetes/overlays/local"
+  monitoring_dir = "${local.repo_root}/infrastructure/deploy/kubernetes/monitoring/local"
+  script_path    = abspath("${path.module}/scripts/bootstrap-workloads.sh")
 }
 
 resource "kind_cluster" "this" {
@@ -15,6 +22,16 @@ resource "kind_cluster" "this" {
 
     node {
       role = "control-plane"
+      # Map host ports into the KinD node so the orderbook NodePort (30801) and
+      # Grafana NodePort (30300) are reachable without kubectl port-forward.
+      extra_port_mappings {
+        container_port = 30801
+        host_port      = 8001
+      }
+      extra_port_mappings {
+        container_port = 30300
+        host_port      = 3000
+      }
     }
   }
 }
@@ -48,10 +65,12 @@ resource "null_resource" "bootstrap_workloads" {
     kubeconfig_sha = kind_cluster.this.id
     istio          = var.istio_chart_version
     redis          = var.redis_chart_version
-    overlay_sha = sha256(join("", [
-      for p in sort(fileset(local.overlay_dir, "**/*.yaml")) :
-      filesha256("${local.overlay_dir}/${p}")
-    ]))
+    kustomize_sha = sha256(join("", concat(
+      [for p in sort(fileset(local.overlay_dir, "**/*.yaml")) : filesha256("${local.overlay_dir}/${p}")],
+      [for p in sort(fileset(local.overlay_dir, "**/*.json")) : filesha256("${local.overlay_dir}/${p}")],
+      [for p in sort(fileset(local.monitoring_dir, "**/*.yaml")) : filesha256("${local.monitoring_dir}/${p}")],
+      [for p in sort(fileset(local.monitoring_dir, "**/*.json")) : filesha256("${local.monitoring_dir}/${p}")],
+    )))
     script_sha = filesha256(local.script_path)
   }
 

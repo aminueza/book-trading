@@ -1,3 +1,9 @@
+# Istio Gateway binds to the default ingress gateway deployment in istio-system.
+# Install Istio before applying (see README): istioctl install or Helm chart.
+#
+# Why Istio instead of community ingress-nginx: the Kubernetes ingress-nginx
+# project is being retired; Istio (or other Gateway API implementations) is the
+# forward-looking edge for clusters that already run a service mesh.
 apiVersion: networking.istio.io/v1beta1
 kind: Gateway
 metadata:

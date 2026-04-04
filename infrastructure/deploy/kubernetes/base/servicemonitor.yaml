@@ -1,3 +1,5 @@
+# ServiceMonitor for Prometheus Operator. Automatically configures Prometheus
+# to scrape the /metrics endpoint on port 9090.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -5,7 +7,7 @@ metadata:
   namespace: trading
   labels:
     app.kubernetes.io/name: orderbook
-    release: prometheus
+    release: prometheus  # Match Prometheus Operator's serviceMonitorSelector
 spec:
   selector:
     matchLabels:

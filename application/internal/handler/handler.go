@@ -10,17 +10,23 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/rs/zerolog/log"
 
-	"orderbook-service/application/internal/middleware"
-	"orderbook-service/application/internal/orderbook"
+	"book-trading/application/internal/middleware"
+	"book-trading/application/internal/orderbook"
+	"book-trading/application/internal/persistence"
 )
 
 type Handler struct {
-	engine *orderbook.Engine
-	cache  *redis.Client
+	engine             *orderbook.Engine
+	cache              *redis.Client
+	snapshotCacheTTL   time.Duration
+	store              *persistence.RedisStore
 }
 
-func New(engine *orderbook.Engine, cache *redis.Client) *Handler {
-	return &Handler{engine: engine, cache: cache}
+func New(engine *orderbook.Engine, cache *redis.Client, snapshotCacheTTL time.Duration, store *persistence.RedisStore) *Handler {
+	if snapshotCacheTTL <= 0 {
+		snapshotCacheTTL = 100 * time.Millisecond
+	}
+	return &Handler{engine: engine, cache: cache, snapshotCacheTTL: snapshotCacheTTL, store: store}
 }
 
 type PlaceOrderRequest struct {
@@ -56,7 +62,10 @@ func (h *Handler) PlaceOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	order, trades := h.engine.PlaceOrder(req.Pair, req.Side, req.Price, req.Quantity)
+	order, trades, touched := h.engine.PlaceOrder(req.Pair, req.Side, req.Price, req.Quantity)
+	if h.store != nil {
+		h.store.RecordPlace(r.Context(), req.Pair, order, trades, touched)
+	}
 
 	h.cache.Del(r.Context(), "orderbook:"+req.Pair)
 
@@ -80,6 +89,9 @@ func (h *Handler) CancelOrder(w http.ResponseWriter, r *http.Request) {
 	if err := h.engine.CancelOrder(pair, orderID); err != nil {
 		writeError(w, reqID, err.Error(), http.StatusNotFound)
 		return
+	}
+	if h.store != nil {
+		h.store.RecordCancel(r.Context(), pair, orderID)
 	}
 
 	h.cache.Del(r.Context(), "orderbook:"+pair)
@@ -117,7 +129,7 @@ func (h *Handler) GetOrderBook(w http.ResponseWriter, r *http.Request) {
 		RequestID: reqID,
 		Timestamp: time.Now().UTC(),
 	}); err == nil {
-		if err := h.cache.Set(r.Context(), cacheKey, data, 100*time.Millisecond).Err(); err != nil {
+		if err := h.cache.Set(r.Context(), cacheKey, data, h.snapshotCacheTTL).Err(); err != nil {
 			log.Debug().Err(err).Msg("cache set failed")
 		}
 	}

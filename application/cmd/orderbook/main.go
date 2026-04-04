@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -16,40 +17,45 @@ import (
 	"github.com/rs/zerolog/log"
 	otelmux "go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
 
-	"orderbook-service/application/internal/handler"
-	"orderbook-service/application/internal/health"
-	"orderbook-service/application/internal/middleware"
-	"orderbook-service/application/internal/orderbook"
-	"orderbook-service/application/internal/telemetry"
+	"book-trading/application/internal/handler"
+	"book-trading/application/internal/health"
+	"book-trading/application/internal/middleware"
+	"book-trading/application/internal/orderbook"
+	"book-trading/application/internal/persistence"
+	"book-trading/application/internal/telemetry"
 )
 
 var version = "dev"
 
 type Config struct {
-	Port            string
-	MetricsPort     string
-	RedisAddr       string
-	RedisPassword   string
-	RedisDB         int
-	ShutdownTimeout time.Duration
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	IdleTimeout     time.Duration
-	RateLimitRPS    int
+	Port                 string
+	MetricsPort          string
+	RedisAddr            string
+	RedisPassword        string
+	RedisDB              int
+	SnapshotCacheTTL     time.Duration
+	RedisRecoverOpen     bool
+	ShutdownTimeout      time.Duration
+	ReadTimeout          time.Duration
+	WriteTimeout         time.Duration
+	IdleTimeout          time.Duration
+	RateLimitRPS         int
 }
 
 func loadConfig() Config {
 	return Config{
-		Port:            getEnv("APP_PORT", "8080"),
-		MetricsPort:     getEnv("METRICS_PORT", "9090"),
-		RedisAddr:       getEnv("REDIS_ADDR", "localhost:6379"),
-		RedisPassword:   getEnv("REDIS_PASSWORD", ""),
-		RedisDB:         0,
-		ShutdownTimeout: 15 * time.Second,
-		ReadTimeout:     5 * time.Second,
-		WriteTimeout:    10 * time.Second,
-		IdleTimeout:     120 * time.Second,
-		RateLimitRPS:    1000,
+		Port:             getEnv("APP_PORT", "8080"),
+		MetricsPort:      getEnv("METRICS_PORT", "9090"),
+		RedisAddr:        getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisPassword:    getEnv("REDIS_PASSWORD", ""),
+		RedisDB:          0,
+		SnapshotCacheTTL: getDurationEnv("ORDERBOOK_SNAPSHOT_CACHE_TTL", 100*time.Millisecond),
+		RedisRecoverOpen: getBoolEnv("ORDERBOOK_REDIS_RECOVER", false),
+		ShutdownTimeout:  15 * time.Second,
+		ReadTimeout:      5 * time.Second,
+		WriteTimeout:     10 * time.Second,
+		IdleTimeout:      120 * time.Second,
+		RateLimitRPS:     1000,
 	}
 }
 
@@ -58,6 +64,28 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getDurationEnv(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Warn().Str("env", key).Str("value", v).Msg("invalid duration; using default")
+	}
+	return fallback
+}
+
+func getBoolEnv(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
 }
 
 func main() {
@@ -91,15 +119,26 @@ func main() {
 		MinIdleConns: 10,
 	})
 
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Warn().Err(err).Msg("redis unavailable at startup; operating in degraded mode")
+	redisErr := rdb.Ping(ctx).Err()
+	if redisErr != nil {
+		log.Warn().Err(redisErr).Msg("redis unavailable at startup; operating in degraded mode")
 	} else {
 		log.Info().Str("addr", cfg.RedisAddr).Msg("redis connected")
 	}
+	redisOK := redisErr == nil
 
 	engine := orderbook.NewEngine()
+	store := persistence.NewRedisStore(rdb)
+	if cfg.RedisRecoverOpen && store != nil && redisOK {
+		n, err := store.RecoverOpenOrders(ctx, engine)
+		if err != nil {
+			log.Warn().Err(err).Msg("redis order recovery failed")
+		} else if n > 0 {
+			log.Info().Int("restored_orders", n).Msg("redis order recovery complete")
+		}
+	}
 	healthChecker := health.NewChecker(rdb)
-	h := handler.New(engine, rdb)
+	h := handler.New(engine, rdb, cfg.SnapshotCacheTTL, store)
 
 	appRouter := mux.NewRouter()
 	appRouter.Use(otelmux.Middleware(getEnv("OTEL_SERVICE_NAME", "orderbook-service")))

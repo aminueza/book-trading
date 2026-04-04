@@ -1,3 +1,11 @@
+# NetworkPolicy implements least-privilege networking:
+#   - Ingress: Only from the Istio ingress gateway (istio-system) on port 8080,
+#     and from Prometheus on port 9090.
+#   - Egress: Only to Redis (port 6379) and DNS (port 53).
+#
+# This prevents lateral movement if the container is compromised. An
+# attacker cannot reach other services, exfiltrate data to the internet,
+# or scan the internal network.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -11,6 +19,7 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # Allow traffic from Istio ingress gateway pods (default install: istio-system).
     - from:
         - namespaceSelector:
             matchLabels:
@@ -21,6 +30,7 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
+    # Allow Prometheus scraping.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -29,6 +39,7 @@ spec:
         - port: 9090
           protocol: TCP
   egress:
+    # Allow Redis access.
     - to:
         - podSelector:
             matchLabels:
@@ -36,6 +47,7 @@ spec:
       ports:
         - port: 6379
           protocol: TCP
+    # Allow DNS resolution.
     - to:
         - namespaceSelector: {}
       ports:

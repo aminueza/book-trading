@@ -1,0 +1,23 @@
+# Local KinD: expose the API on in-cluster port 8001 and map host :8001 via
+# extraPortMappings (terraform) -> nodePort 30801 — no kubectl proxy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: orderbook
+  namespace: trading
+spec:
+  type: NodePort
+  # Strategic merge merges ports by port number, so a plain list appends 8001 next to
+  # base :80 and yields two ports named "http". Replace the whole list.
+  ports:
+    - $patch: replace
+    - name: http
+      port: 8001
+      targetPort: http
+      nodePort: 30801
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      nodePort: 30802
+      protocol: TCP

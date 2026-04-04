@@ -95,7 +95,7 @@ func (e *Engine) getOrCreateBook(pair string) *book {
 	return b
 }
 
-func (e *Engine) PlaceOrder(pair string, side Side, price, quantity float64) (*Order, []Trade) {
+func (e *Engine) PlaceOrder(pair string, side Side, price, quantity float64) (*Order, []Trade, []*Order) {
 	order := &Order{
 		ID:        uuid.New().String(),
 		Pair:      pair,
@@ -111,7 +111,7 @@ func (e *Engine) PlaceOrder(pair string, side Side, price, quantity float64) (*O
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	trades := b.match(order)
+	trades, touchedMakers := b.match(order)
 
 	if order.Remaining > 0 {
 		if order.Side == Buy {
@@ -133,11 +133,23 @@ func (e *Engine) PlaceOrder(pair string, side Side, price, quantity float64) (*O
 		}
 	}
 
-	return order, trades
+	seen := make(map[string]*Order, 1+len(touchedMakers))
+	seen[order.ID] = order
+	for _, o := range touchedMakers {
+		if o != nil {
+			seen[o.ID] = o
+		}
+	}
+	out := make([]*Order, 0, len(seen))
+	for _, o := range seen {
+		out = append(out, o)
+	}
+	return order, trades, out
 }
 
-func (b *book) match(taker *Order) []Trade {
+func (b *book) match(taker *Order) ([]Trade, []*Order) {
 	var trades []Trade
+	var touched []*Order
 	var opposing *[]*Order
 
 	if taker.Side == Buy {
@@ -180,9 +192,11 @@ func (b *book) match(taker *Order) []Trade {
 
 		if maker.Remaining <= 0 {
 			maker.Status = StatusFilled
+			touched = append(touched, maker)
 			i++
 		} else {
 			maker.Status = StatusPartial
+			touched = append(touched, maker)
 		}
 
 		if taker.Remaining <= 0 {
@@ -192,10 +206,9 @@ func (b *book) match(taker *Order) []Trade {
 		}
 	}
 
-	// Remove fully filled makers.
 	*opposing = (*opposing)[i:]
 
-	return trades
+	return trades, touched
 }
 
 func (e *Engine) CancelOrder(pair, orderID string) error {
@@ -218,6 +231,44 @@ func (e *Engine) CancelOrder(pair, orderID string) error {
 		}
 	}
 	return fmt.Errorf("order %s not found in pair %s", orderID, pair)
+}
+
+func (e *Engine) RestoreOpenOrder(o *Order) error {
+	if o == nil || o.Pair == "" || o.ID == "" {
+		return fmt.Errorf("invalid order")
+	}
+	if o.Remaining <= 0 {
+		return fmt.Errorf("nothing to restore")
+	}
+	if o.Status != StatusOpen && o.Status != StatusPartial {
+		return fmt.Errorf("status %s not restorable", o.Status)
+	}
+
+	b := e.getOrCreateBook(o.Pair)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	rest := *o
+	restored := &rest
+
+	if restored.Side == Buy {
+		b.bids = append(b.bids, restored)
+		sort.Slice(b.bids, func(i, j int) bool {
+			if b.bids[i].Price != b.bids[j].Price {
+				return b.bids[i].Price > b.bids[j].Price
+			}
+			return b.bids[i].CreatedAt.Before(b.bids[j].CreatedAt)
+		})
+	} else {
+		b.asks = append(b.asks, restored)
+		sort.Slice(b.asks, func(i, j int) bool {
+			if b.asks[i].Price != b.asks[j].Price {
+				return b.asks[i].Price < b.asks[j].Price
+			}
+			return b.asks[i].CreatedAt.Before(b.asks[j].CreatedAt)
+		})
+	}
+	return nil
 }
 
 func (e *Engine) Snapshot(pair string, depth int) BookSnapshot {

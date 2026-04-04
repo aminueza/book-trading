@@ -1,4 +1,4 @@
-module orderbook-service
+module book-trading
 
 go 1.24.0
 

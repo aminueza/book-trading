@@ -12,7 +12,7 @@ variable "node_image" {
 
 variable "orderbook_image" {
   type        = string
-  description = "Container image loaded into kind nodes."
+  description = "Image reference to load into the kind nodes (build first: docker build -t orderbook-service:latest .)."
   default     = "orderbook-service:latest"
 }
 

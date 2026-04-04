@@ -1,0 +1,17 @@
+# Service HTTP port is 8001 in the local overlay (see service-local.yaml).
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: orderbook
+  namespace: trading
+spec:
+  http:
+    - name: orderbook-api
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: orderbook
+            port:
+              number: 8001

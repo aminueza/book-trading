@@ -1,3 +1,5 @@
+# Routes external HTTP from orderbook-gateway to the orderbook ClusterIP service.
+# Service port 80 maps to container 8080 (see service.yaml).
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
