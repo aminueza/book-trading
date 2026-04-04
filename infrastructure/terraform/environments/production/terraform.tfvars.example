@@ -1,0 +1,6 @@
+# Copy this file to terraform.tfvars and fill in values.
+# NEVER commit terraform.tfvars to version control.
+
+aws_region         = "us-east-1"
+pagerduty_endpoint = "https://events.pagerduty.com/integration/XXXX/enqueue"
+slack_webhook_url  = "https://hooks.slack.com/services/XXXX/YYYY/ZZZZ"

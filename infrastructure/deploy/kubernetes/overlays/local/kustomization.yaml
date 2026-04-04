@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: trading
+
+resources:
+  - ../../base
+
+images:
+  - name: orderbook-service
+    newName: orderbook-service
+    newTag: latest
+
+patches:
+  - path: patches/namespace-local.yaml
+  - path: patches/deployment-local.yaml
+  - path: patches/pdb-local.yaml
+  - path: patches/delete-servicemonitor.yaml
+  - path: patches/delete-hpa.yaml

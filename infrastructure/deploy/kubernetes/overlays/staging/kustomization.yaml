@@ -1,0 +1,57 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: trading-staging
+
+resources:
+  - ../../base
+
+namePrefix: staging-
+
+images:
+  - name: orderbook-service
+    newName: registry.internal/trading/orderbook-service
+    newTag: "latest"
+
+patches:
+  - target:
+      kind: Deployment
+      name: orderbook
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "100m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "250m"
+
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: orderbook
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 2
+      - op: replace
+        path: /spec/maxReplicas
+        value: 4
+
+  - target:
+      kind: VirtualService
+      name: orderbook
+    patch: |
+      - op: replace
+        path: /spec/gateways/0
+        value: staging-orderbook-gateway
+      - op: replace
+        path: /spec/http/0/route/0/destination/host
+        value: staging-orderbook
+
+configMapGenerator:
+  - name: orderbook-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=debug

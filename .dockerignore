@@ -1,0 +1,10 @@
+.git
+.github
+*.md
+docs/
+deploy/
+terraform/
+ci/
+test/
+.env*
+infrastructure/

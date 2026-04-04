@@ -1,0 +1,22 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: orderbook
+  labels:
+    app.kubernetes.io/name: orderbook
+    app.kubernetes.io/component: virtualservice
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - orderbook-gateway
+  http:
+    - name: orderbook-api
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: orderbook
+            port:
+              number: 80

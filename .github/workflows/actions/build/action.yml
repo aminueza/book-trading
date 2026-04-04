@@ -1,0 +1,231 @@
+name: "Docker Build and Push"
+description: "Build and push Docker images with best practices: BuildKit, caching, multi-platform, SBOM, and signing"
+
+inputs:
+  context:
+    description: "Build context path"
+    required: false
+    default: "."
+  dockerfile:
+    description: "Path to Dockerfile relative to context"
+    required: false
+    default: "Dockerfile"
+  image-name:
+    description: "Image name without registry (e.g., api, frontend)"
+    required: true
+  registry:
+    description: "Container registry URL"
+    required: true
+  registry-username:
+    description: "Registry username"
+    required: true
+  registry-password:
+    description: "Registry password or token"
+    required: true
+  tags:
+    description: "Additional tags (comma-separated). Auto-generates: sha, latest, branch"
+    required: false
+    default: ""
+  platforms:
+    description: "Target platforms for multi-arch builds (e.g., linux/amd64,linux/arm64)"
+    required: false
+    default: "linux/amd64"
+  build-args:
+    description: "Build arguments (KEY=value format, one per line)"
+    required: false
+    default: ""
+  target:
+    description: "Target build stage for multi-stage Dockerfiles"
+    required: false
+    default: ""
+  cache-from:
+    description: "Cache source (gha, registry, or custom)"
+    required: false
+    default: "gha"
+  cache-to:
+    description: "Cache destination (gha, registry, or custom)"
+    required: false
+    default: "gha"
+  push:
+    description: "Push image to registry"
+    required: false
+    default: "true"
+  load:
+    description: "Load image into local Docker daemon"
+    required: false
+    default: "false"
+  provenance:
+    description: "Generate SLSA provenance attestation"
+    required: false
+    default: "true"
+  sbom:
+    description: "Generate Software Bill of Materials"
+    required: false
+    default: "true"
+  cosign-key:
+    description: "Cosign private key for signing (optional)"
+    required: false
+    default: ""
+  cosign-password:
+    description: "Cosign private key password (optional)"
+    required: false
+    default: ""
+  labels:
+    description: "Additional OCI labels (KEY=value format, one per line)"
+    required: false
+    default: ""
+
+outputs:
+  image-digest:
+    description: "Image digest (sha256:...)"
+    value: ${{ steps.build.outputs.digest }}
+  image-tags:
+    description: "Generated image tags"
+    value: ${{ steps.meta.outputs.tags }}
+  image-version:
+    description: "Generated image version"
+    value: ${{ steps.meta.outputs.version }}
+  metadata:
+    description: "Build metadata JSON"
+    value: ${{ steps.build.outputs.metadata }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: "🔧 Set up QEMU"
+      if: ${{ inputs.platforms != 'linux/amd64' }}
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: ${{ inputs.platforms }}
+
+    - name: "🔧 Set up Docker Buildx"
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: |
+          image=moby/buildkit:master
+          network=host
+
+    - name: "🔐 Login to Container Registry"
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.registry-username }}
+        password: ${{ inputs.registry-password }}
+
+    - name: "🏷️ Extract Metadata"
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ inputs.registry }}/${{ inputs.image-name }}
+        tags: |
+          type=sha,prefix=,format=short
+          type=sha,prefix=,format=long
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=raw,value=latest,enable={{is_default_branch}}
+          ${{ inputs.tags }}
+        labels: |
+          org.opencontainers.image.title=${{ inputs.image-name }}
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.created=${{ github.event.repository.updated_at }}
+          org.opencontainers.image.vendor=${{ github.repository_owner }}
+          ${{ inputs.labels }}
+
+    - name: "🏗️ Build and Push"
+      id: build
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+        platforms: ${{ inputs.platforms }}
+        push: ${{ inputs.push }}
+        load: ${{ inputs.load }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        target: ${{ inputs.target }}
+        build-args: ${{ inputs.build-args }}
+        provenance: ${{ inputs.provenance }}
+        sbom: ${{ inputs.sbom }}
+        cache-from: ${{ inputs.cache-from == 'gha' && 'type=gha' || inputs.cache-from == 'registry' && format('type=registry,ref={0}/{1}:cache', inputs.registry, inputs.image-name) || inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to == 'gha' && 'type=gha,mode=max' || inputs.cache-to == 'registry' && format('type=registry,ref={0}/{1}:cache,mode=max', inputs.registry, inputs.image-name) || inputs.cache-to }}
+
+    - name: "🔏 Sign Image with Cosign"
+      if: ${{ inputs.cosign-key != '' && inputs.push == 'true' }}
+      shell: bash
+      env:
+        COSIGN_KEY: ${{ inputs.cosign-key }}
+        COSIGN_PASSWORD: ${{ inputs.cosign-password }}
+        DIGEST: ${{ steps.build.outputs.digest }}
+        REGISTRY: ${{ inputs.registry }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        # Install cosign
+        COSIGN_VERSION="v2.2.4"
+        curl -sSfL https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64 -o /tmp/cosign
+        chmod +x /tmp/cosign
+        
+        # Sign the image
+        echo "${COSIGN_KEY}" > /tmp/cosign.key
+        /tmp/cosign sign --key /tmp/cosign.key "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" --yes
+        
+        # Cleanup
+        rm -f /tmp/cosign.key /tmp/cosign
+        echo "✅ Image signed successfully"
+
+    - name: "📊 Generate Build Summary"
+      shell: bash
+      env:
+        DIGEST: ${{ steps.build.outputs.digest }}
+        TAGS: ${{ steps.meta.outputs.tags }}
+        VERSION: ${{ steps.meta.outputs.version }}
+        REGISTRY: ${{ inputs.registry }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        PLATFORMS: ${{ inputs.platforms }}
+        PUSH: ${{ inputs.push }}
+        SBOM: ${{ inputs.sbom }}
+        PROVENANCE: ${{ inputs.provenance }}
+        SIGNED: ${{ inputs.cosign-key != '' && inputs.push == 'true' }}
+      run: |
+        {
+          echo "### 🐳 Docker Build Summary"
+          echo ""
+          echo "| Property | Value |"
+          echo "|----------|-------|"
+          echo "| **Image** | \`${REGISTRY}/${IMAGE_NAME}\` |"
+          echo "| **Digest** | \`${DIGEST}\` |"
+          echo "| **Version** | \`${VERSION}\` |"
+          echo "| **Platforms** | ${PLATFORMS} |"
+          echo "| **Pushed** | ${PUSH} |"
+          echo "| **SBOM Generated** | ${SBOM} |"
+          echo "| **Provenance** | ${PROVENANCE} |"
+          echo "| **Signed** | ${SIGNED} |"
+          echo ""
+          echo "<details><summary>📋 Generated Tags</summary>"
+          echo ""
+          echo '```'
+          echo "${TAGS}" | tr ',' '\n'
+          echo '```'
+          echo "</details>"
+          echo ""
+          if [ "${PUSH}" == "true" ]; then
+            echo "#### 🚀 Pull Command"
+            echo '```bash'
+            echo "docker pull ${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+            echo '```'
+          fi
+        } >> $GITHUB_STEP_SUMMARY
+
+    - name: "✅ Verify Build Artifacts"
+      if: ${{ inputs.push == 'true' }}
+      shell: bash
+      env:
+        DIGEST: ${{ steps.build.outputs.digest }}
+        REGISTRY: ${{ inputs.registry }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        echo "🔍 Verifying pushed image..."
+        docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+        echo "✅ Image verification complete"

@@ -1,0 +1,6 @@
+.terraform/
+kubeconfig.yaml
+*.tfstate
+*.tfstate.backup
+crash.log
+crash.*.log

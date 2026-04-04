@@ -1,0 +1,263 @@
+name: "Go lint & security"
+description: "gofmt, go vet, golangci-lint, gosec (SAST), and govulncheck (module vulnerabilities)"
+
+inputs:
+  fail-on-error:
+    description: "If false, golangci-lint failures do not fail the job"
+    required: false
+    default: "true"
+  fail-on-security:
+    description: "If false, gosec/govulncheck findings do not fail the job"
+    required: false
+    default: "true"
+  go-version:
+    description: "Go version (e.g. 1.22.x)"
+    required: false
+    default: "1.22"
+  go-working-directory:
+    description: "Directory containing go.mod"
+    required: false
+    default: "."
+  golangci-lint-version:
+    description: "golangci-lint release tag (use 'latest' to match default CI)"
+    required: false
+    default: "latest"
+  golangci-args:
+    description: "Extra arguments for golangci-lint run"
+    required: false
+    default: "--timeout=5m"
+  run-go-vet:
+    description: "Run go vet ./..."
+    required: false
+    default: "true"
+  run-gofmt-check:
+    description: "Fail if any .go file is not gofmt-formatted"
+    required: false
+    default: "true"
+  run-gosec:
+    description: "Run gosec SAST (insecure patterns in Go source)"
+    required: false
+    default: "true"
+  gosec-version:
+    description: "gosec module version tag (e.g. v2.22.2) or latest"
+    required: false
+    default: "v2.22.2"
+  gosec-args:
+    description: "Extra gosec arguments before ./..."
+    required: false
+    default: ""
+  run-govulncheck:
+    description: "Run govulncheck on module dependencies"
+    required: false
+    default: "true"
+  govulncheck-version:
+    description: "govulncheck install version (module path version suffix)"
+    required: false
+    default: "latest"
+
+outputs:
+  golang-status:
+    description: "golangci-lint step outcome"
+    value: ${{ steps.golang-lint.outcome }}
+  gosec-status:
+    description: "gosec result (success, failure, or skipped)"
+    value: ${{ steps.gosec.outputs.result }}
+  govulncheck-status:
+    description: "govulncheck result (success, failure, or skipped)"
+    value: ${{ steps.govulncheck.outputs.result }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: "Setup Go"
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache-dependency-path: ${{ inputs.go-working-directory }}/go.sum
+
+    - name: "Download Go modules"
+      shell: bash
+      working-directory: ${{ inputs.go-working-directory }}
+      run: go mod download
+
+    - name: "Verify gofmt"
+      if: ${{ inputs.run-gofmt-check == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.go-working-directory }}
+      run: |
+        echo "Checking gofmt..."
+        UNFMT=$(gofmt -l .)
+        if [ -n "$UNFMT" ]; then
+          echo "::error::Run gofmt on:"
+          echo "$UNFMT"
+          exit 1
+        fi
+        echo "✅ gofmt clean"
+
+    - name: "go vet"
+      if: ${{ inputs.run-go-vet == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.go-working-directory }}
+      run: |
+        echo "Running go vet ./..."
+        go vet ./...
+        echo "✅ go vet passed"
+
+    - name: "golangci-lint"
+      id: golang-lint
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: ${{ inputs.golangci-lint-version }}
+        working-directory: ${{ inputs.go-working-directory }}
+        args: ${{ inputs.golangci-args }}
+      continue-on-error: ${{ inputs.fail-on-error != 'true' }}
+
+    - name: "gosec (SAST)"
+      id: gosec
+      shell: bash
+      working-directory: ${{ inputs.go-working-directory }}
+      continue-on-error: ${{ inputs.fail-on-security != 'true' }}
+      env:
+        RUN_GOSEC: ${{ inputs.run-gosec }}
+        GOSEC_VER: ${{ inputs.gosec-version }}
+        GOSEC_EXTRA: ${{ inputs.gosec-args }}
+      run: |
+        set -euo pipefail
+        if [ "$RUN_GOSEC" != "true" ]; then
+          echo "result=skipped" >> "$GITHUB_OUTPUT"
+          echo "⏭️ gosec skipped"
+          exit 0
+        fi
+
+        echo "Installing gosec@${GOSEC_VER}..."
+        go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VER}"
+        export PATH="$(go env GOPATH)/bin:$PATH"
+
+        echo "Running gosec (JSON report)..."
+        set +e
+        # shellcheck disable=SC2086
+        gosec -fmt json -out gosec-report.json $GOSEC_EXTRA ./...
+        GOSEC_EXIT=$?
+        set -e
+
+        if [ -f gosec-report.json ]; then
+          ISSUES=$(jq '[.Issues[]?] | length' gosec-report.json 2>/dev/null || echo 0)
+          echo "gosec issue count: ${ISSUES}"
+          jq -r '.Issues[]? | "[\(.severity)] \(.file):\(.line) — \(.rule_id): \(.details)"' gosec-report.json 2>/dev/null | head -25 || true
+          {
+            echo "### gosec (Go SAST)"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Issues | ${ISSUES} |"
+            echo ""
+            if [ "${ISSUES:-0}" -gt 0 ]; then
+              echo "<details><summary>Findings (first 30)</summary>"
+              echo ""
+              echo '```'
+              jq -r '.Issues[]? | "[\(.severity)] \(.file):\(.line) — \(.rule_id): \(.details)"' gosec-report.json | head -30
+              echo '```'
+              echo "</details>"
+            else
+              echo "✅ No gosec findings."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$GOSEC_EXIT" -eq 0 ]; then
+          echo "result=success" >> "$GITHUB_OUTPUT"
+          echo "✅ gosec passed"
+          exit 0
+        fi
+
+        echo "result=failure" >> "$GITHUB_OUTPUT"
+        echo "❌ gosec reported issues"
+        exit "$GOSEC_EXIT"
+
+    - name: "govulncheck (module vulnerabilities)"
+      id: govulncheck
+      shell: bash
+      working-directory: ${{ inputs.go-working-directory }}
+      continue-on-error: ${{ inputs.fail-on-security != 'true' }}
+      env:
+        RUN_GOVULN: ${{ inputs.run-govulncheck }}
+        GOVULN_VER: ${{ inputs.govulncheck-version }}
+      run: |
+        set -euo pipefail
+        if [ "$RUN_GOVULN" != "true" ]; then
+          echo "result=skipped" >> "$GITHUB_OUTPUT"
+          echo "⏭️ govulncheck skipped"
+          exit 0
+        fi
+
+        echo "Installing govulncheck@${GOVULN_VER}..."
+        go install "golang.org/x/vuln/cmd/govulncheck@${GOVULN_VER}"
+        export PATH="$(go env GOPATH)/bin:$PATH"
+
+        echo "Running govulncheck ./..."
+        set +e
+        govulncheck -json ./... > govulncheck.json 2> govulncheck.stderr
+        GV_EXIT=$?
+        set -e
+
+        if [ -s govulncheck.stderr ]; then
+          echo "--- govulncheck (stderr) ---"
+          cat govulncheck.stderr
+        fi
+
+        {
+          echo "### govulncheck"
+          echo ""
+          if [ -f govulncheck.json ] && [ -s govulncheck.json ]; then
+            LINES=$(wc -l < govulncheck.json | tr -d ' ')
+            echo "JSON stream lines: **${LINES}** (newline-delimited output from \`-json\`)"
+            echo ""
+            echo "<details><summary>govulncheck JSON (truncated)</summary>"
+            echo ""
+            echo '```json'
+            head -c 12000 govulncheck.json
+            echo ""
+            echo '```'
+            echo "</details>"
+          else
+            echo "No JSON on stdout; stderr excerpt:"
+            echo '```'
+            head -80 govulncheck.stderr 2>/dev/null || true
+            echo '```'
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$GV_EXIT" -eq 0 ]; then
+          echo "result=success" >> "$GITHUB_OUTPUT"
+          echo "✅ govulncheck passed"
+          exit 0
+        fi
+
+        echo "result=failure" >> "$GITHUB_OUTPUT"
+        echo "❌ govulncheck reported vulnerabilities or errors"
+        exit "$GV_EXIT"
+
+    - name: "Lint & security summary"
+      if: always()
+      shell: bash
+      env:
+        GOLANG_OUT: ${{ steps.golang-lint.outcome }}
+        GOSEC_RES: ${{ steps.gosec.outputs.result }}
+        GOVULN_RES: ${{ steps.govulncheck.outputs.result }}
+      run: |
+        GOFMT_ROW="skipped"
+        GOVET_ROW="skipped"
+        [ "${{ inputs.run-gofmt-check }}" = "true" ] && GOFMT_ROW="checked"
+        [ "${{ inputs.run-go-vet }}" = "true" ] && GOVET_ROW="checked"
+        {
+          echo "### Go lint & security"
+          echo ""
+          echo "| Check | Result |"
+          echo "|-------|--------|"
+          echo "| gofmt | ${GOFMT_ROW} |"
+          echo "| go vet | ${GOVET_ROW} |"
+          echo "| golangci-lint | ${GOLANG_OUT} |"
+          echo "| gosec | ${GOSEC_RES:-pending} |"
+          echo "| govulncheck | ${GOVULN_RES:-pending} |"
+          echo ""
+        } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: orderbook
+  namespace: trading
+  labels:
+    app.kubernetes.io/name: orderbook
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orderbook
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+  namespaceSelector:
+    matchNames:
+      - trading

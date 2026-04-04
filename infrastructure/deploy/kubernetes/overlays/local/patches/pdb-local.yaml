@@ -1,0 +1,7 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orderbook
+  namespace: trading
+spec:
+  minAvailable: 1
