@@ -61,7 +61,7 @@ func TestPlaceOrderAndOrderbook(t *testing.T) {
 
 	pair := "TEST-USD"
 
-	sell := httptest.NewRequest(http.MethodPost, "/api/v1/orders", 	bytes.NewBufferString(
+	sell := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"sell","price":100,"quantity":2}`,
 	))
 	sell.Header.Set("Content-Type", "application/json")
@@ -71,7 +71,7 @@ func TestPlaceOrderAndOrderbook(t *testing.T) {
 		t.Fatalf("sell: %d %s", recSell.Code, recSell.Body.String())
 	}
 
-	buy := httptest.NewRequest(http.MethodPost, "/api/v1/orders", 	bytes.NewBufferString(
+	buy := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"buy","price":100,"quantity":0.5}`,
 	))
 	buy.Header.Set("Content-Type", "application/json")
@@ -104,7 +104,7 @@ func TestCancelOrder(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close(); mr.Close() })
 
 	pair := "CAN-USD"
-	place := httptest.NewRequest(http.MethodPost, "/api/v1/orders", 	bytes.NewBufferString(
+	place := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"buy","price":10,"quantity":1}`,
 	))
 	place.Header.Set("Content-Type", "application/json")
@@ -141,13 +141,13 @@ func TestTradesEndpoint(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close(); mr.Close() })
 
 	pair := "TRD-USD"
-	sell := httptest.NewRequest(http.MethodPost, "/api/v1/orders", 	bytes.NewBufferString(
+	sell := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"sell","price":50,"quantity":1}`,
 	))
 	sell.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(httptest.NewRecorder(), sell)
 
-	buy := httptest.NewRequest(http.MethodPost, "/api/v1/orders", 	bytes.NewBufferString(
+	buy := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"buy","price":50,"quantity":1}`,
 	))
 	buy.Header.Set("Content-Type", "application/json")
