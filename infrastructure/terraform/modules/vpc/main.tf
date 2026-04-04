@@ -172,6 +172,7 @@ resource "aws_iam_role" "flow_logs" {
   tags = var.tags
 }
 
+# tfsec:ignore:aws-iam-no-policy-wildcards -- The :* suffix is required by CloudWatch Logs to match log streams within the group. The resource is scoped to a single log group, not all logs.
 resource "aws_iam_role_policy" "flow_logs" {
   name = "flow-logs-policy"
   role = aws_iam_role.flow_logs.id
