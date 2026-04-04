@@ -11,9 +11,9 @@ inputs:
     required: false
     default: "true"
   go-version:
-    description: "Go version (e.g. 1.22.x)"
+    description: "Go version (e.g. 1.24.x)"
     required: false
-    default: "1.22"
+    default: "1.24"
   go-working-directory:
     description: "Directory containing go.mod"
     required: false
