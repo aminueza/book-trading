@@ -1,5 +1,5 @@
 name: "Container Security Scan"
-description: "Scan container images using CodeQL and Trivy for security vulnerabilities"
+description: "Trivy filesystem scan (vulns, secrets) and SARIF upload to GitHub Security"
 
 inputs:
   dockerfile-dir:
@@ -40,7 +40,7 @@ runs:
   steps:
     - name: '🔍 Run Trivy Dockerfile scanner'
       id: trivy
-      uses: aquasecurity/trivy-action@0.33.1
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
       continue-on-error: true
       with:
         scan-type: 'fs'
@@ -56,7 +56,7 @@ runs:
         scanners: 'vuln,secret'
 
     - name: '📊 Upload Trivy results to GitHub Security'
-      uses: github/codeql-action/upload-sarif@v4
+      uses: github/codeql-action/upload-sarif@0e9f55954318745b37b7933c693bc093f7336125
       with:
         sarif_file: ./trivy-${{ inputs.category }}.sarif
         category: ${{ inputs.category }}

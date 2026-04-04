@@ -103,7 +103,9 @@ func (h *Handler) GetOrderBook(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Cache", "HIT")
 		w.Header().Set("X-Request-ID", reqID)
-		w.Write(cached)
+		if _, err := w.Write(cached); err != nil {
+			log.Error().Err(err).Str("request_id", reqID).Msg("write cached orderbook")
+		}
 		return
 	}
 
@@ -144,22 +146,26 @@ func writeSuccess(w http.ResponseWriter, reqID string, data interface{}, status 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-ID", reqID)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(APIResponse{
+	if err := json.NewEncoder(w).Encode(APIResponse{
 		Success:   true,
 		Data:      data,
 		RequestID: reqID,
 		Timestamp: time.Now().UTC(),
-	})
+	}); err != nil {
+		log.Error().Err(err).Str("request_id", reqID).Msg("encode success response")
+	}
 }
 
 func writeError(w http.ResponseWriter, reqID, msg string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Request-ID", reqID)
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(APIResponse{
+	if err := json.NewEncoder(w).Encode(APIResponse{
 		Success:   false,
 		Error:     msg,
 		RequestID: reqID,
 		Timestamp: time.Now().UTC(),
-	})
+	}); err != nil {
+		log.Error().Err(err).Str("request_id", reqID).Msg("encode error response")
+	}
 }

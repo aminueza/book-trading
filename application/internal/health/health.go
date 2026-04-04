@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/rs/zerolog/log"
 )
 
 type Checker struct {
@@ -32,10 +33,12 @@ func (c *Checker) SetReady(ready bool) {
 
 func (c *Checker) Liveness(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(HealthResponse{
+	if err := json.NewEncoder(w).Encode(HealthResponse{
 		Status:    "ok",
 		Timestamp: time.Now().UTC(),
-	})
+	}); err != nil {
+		log.Error().Err(err).Msg("encode liveness")
+	}
 }
 
 func (c *Checker) Readiness(w http.ResponseWriter, r *http.Request) {
@@ -63,9 +66,11 @@ func (c *Checker) Readiness(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(HealthResponse{
+	if err := json.NewEncoder(w).Encode(HealthResponse{
 		Status:    status,
 		Checks:    checks,
 		Timestamp: time.Now().UTC(),
-	})
+	}); err != nil {
+		log.Error().Err(err).Msg("encode readiness")
+	}
 }
