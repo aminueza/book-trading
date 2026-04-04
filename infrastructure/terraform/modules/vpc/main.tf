@@ -38,9 +38,8 @@ resource "aws_subnet" "public" {
   cidr_block        = var.public_subnet_cidrs[count.index]
   availability_zone = var.availability_zones[count.index]
 
-  # tfsec:ignore:aws-ec2-no-public-ip-subnet -- Public subnets host ALB/NLB which require public IPs.
-  # No application workloads run here; EKS nodes are in private subnets.
-  map_public_ip_on_launch = true
+  # Public subnets host ALB/NLB which require public IPs. No workloads run here; EKS nodes are in private subnets.
+  map_public_ip_on_launch = true #tfsec:ignore:aws-ec2-no-public-ip-subnet
 
   tags = merge(var.tags, {
     Name                     = "${var.environment}-public-${var.availability_zones[count.index]}"
