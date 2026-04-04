@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 350" font-family="system-ui, -apple-system, sans-serif" font-size="13">
+  <defs>
+    <filter id="shadow" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="1" stdDeviation="2" flood-opacity="0.08"/>
+    </filter>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a0aec0"/>
+    </marker>
+    <marker id="arr-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dd6b20"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="480" fill="#f8f9fa" rx="8"/>
+
+  <!-- ==================== LEFT: Data path ==================== -->
+
+  <!-- Istio Gateway -->
+  <rect x="120" y="25" width="240" height="42" rx="6" fill="#2d3748" filter="url(#shadow)"/>
+  <text x="240" y="51" text-anchor="middle" fill="white" font-weight="600" font-size="14">Istio Gateway</text>
+
+  <!-- Lines: gateway → pods -->
+  <line x1="190" y1="67" x2="100" y2="100" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="240" y1="67" x2="240" y2="100" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="290" y1="67" x2="380" y2="100" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Pod 1 -->
+  <rect x="20" y="105" width="160" height="46" rx="6" fill="#4a7fb5" filter="url(#shadow)"/>
+  <text x="100" y="126" text-anchor="middle" fill="white" font-weight="600" font-size="12">orderbook pod (1)</text>
+  <text x="100" y="142" text-anchor="middle" fill="#d4e4f7" font-size="10">:8080 app  :9090 metrics</text>
+
+  <!-- Pod 2 -->
+  <rect x="160" y="105" width="160" height="46" rx="6" fill="#4a7fb5" filter="url(#shadow)"/>
+  <text x="240" y="126" text-anchor="middle" fill="white" font-weight="600" font-size="12">orderbook pod (2)</text>
+  <text x="240" y="142" text-anchor="middle" fill="#d4e4f7" font-size="10">:8080 app  :9090 metrics</text>
+
+  <!-- Pod 3 -->
+  <rect x="300" y="105" width="160" height="46" rx="6" fill="#4a7fb5" filter="url(#shadow)"/>
+  <text x="380" y="126" text-anchor="middle" fill="white" font-weight="600" font-size="12">orderbook pod (3)</text>
+  <text x="380" y="142" text-anchor="middle" fill="#d4e4f7" font-size="10">:8080 app  :9090 metrics</text>
+
+  <!-- Lines: pods → Redis -->
+  <line x1="100" y1="151" x2="200" y2="195" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="240" y1="151" x2="240" y2="195" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="380" y1="151" x2="280" y2="195" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Redis -->
+  <rect x="160" y="200" width="160" height="46" rx="6" fill="#c53030" filter="url(#shadow)"/>
+  <text x="240" y="221" text-anchor="middle" fill="white" font-weight="600">Redis</text>
+  <text x="240" y="237" text-anchor="middle" fill="#fed7d7" font-size="11">cache / journal</text>
+
+  <!-- ==================== RIGHT: Observability ==================== -->
+
+  <!-- Observability section background -->
+  <rect x="510" y="25" width="270" height="230" rx="8" fill="#f0f4f8" stroke="#d0d8e0" stroke-width="1"/>
+  <text x="645" y="48" text-anchor="middle" fill="#718096" font-size="11" font-weight="600" letter-spacing="1">OBSERVABILITY</text>
+
+  <!-- Prometheus -->
+  <rect x="530" y="60" width="230" height="50" rx="6" fill="white" stroke="#a0aec0" stroke-width="1" filter="url(#shadow)"/>
+  <text x="645" y="82" text-anchor="middle" fill="#2d3748" font-weight="600">Prometheus</text>
+  <text x="645" y="100" text-anchor="middle" fill="#718096" font-size="10">scrapes :9090 | request rate, latency, in-flight</text>
+
+  <!-- Tempo -->
+  <rect x="530" y="120" width="230" height="50" rx="6" fill="white" stroke="#a0aec0" stroke-width="1" filter="url(#shadow)"/>
+  <text x="645" y="142" text-anchor="middle" fill="#2d3748" font-weight="600">Tempo</text>
+  <text x="645" y="160" text-anchor="middle" fill="#718096" font-size="10">OTEL Collector | distributed traces</text>
+
+  <!-- Grafana -->
+  <rect x="530" y="180" width="230" height="50" rx="6" fill="white" stroke="#a0aec0" stroke-width="1" filter="url(#shadow)"/>
+  <text x="645" y="202" text-anchor="middle" fill="#2d3748" font-weight="600">Grafana</text>
+  <text x="645" y="220" text-anchor="middle" fill="#718096" font-size="10">dashboards | SLOs, Redis, Go runtime</text>
+
+  <!-- Arrow: pods → Prometheus (scrape) -->
+  <line x1="460" y1="120" x2="528" y2="85" stroke="#dd6b20" stroke-width="1.5" marker-end="url(#arr-orange)"/>
+  <text x="488" y="94" fill="#dd6b20" font-size="9" font-weight="600">scrape</text>
+
+  <!-- Arrow: pods → Tempo (push traces) -->
+  <line x1="460" y1="135" x2="528" y2="145" stroke="#dd6b20" stroke-width="1.5" marker-end="url(#arr-orange)"/>
+  <text x="488" y="135" fill="#dd6b20" font-size="9" font-weight="600">traces</text>
+
+  <!-- Arrow: Grafana → Prometheus (query) -->
+  <line x1="600" y1="180" x2="600" y2="112" stroke="#a0aec0" stroke-width="1" marker-end="url(#arr)"/>
+
+  <!-- Arrow: Grafana → Tempo (query) -->
+  <line x1="690" y1="180" x2="690" y2="172" stroke="#a0aec0" stroke-width="1" marker-end="url(#arr)"/>
+
+  <!-- "queries" label between Grafana and sources -->
+  <text x="715" y="163" fill="#a0aec0" font-size="9">queries</text>
+
+  <!-- ==================== BOTTOM: K8s properties ==================== -->
+
+  <!-- K8s bar -->
+  <rect x="20" y="280" width="760" height="50" rx="6" fill="#edf2f7" filter="url(#shadow)"/>
+  <text x="400" y="302" text-anchor="middle" fill="#4a5568" font-size="12" font-weight="600">Kubernetes: 3 replicas | topology spread | pod anti-affinity | NetworkPolicy zero-trust</text>
+  <text x="400" y="320" text-anchor="middle" fill="#718096" font-size="11">HPA 3-10 pods | PDB minAvailable=2 | rolling update maxUnavailable=0 | Guaranteed QoS</text>
+
+</svg>

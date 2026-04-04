@@ -28,18 +28,18 @@ import (
 var version = "dev"
 
 type Config struct {
-	Port                 string
-	MetricsPort          string
-	RedisAddr            string
-	RedisPassword        string
-	RedisDB              int
-	SnapshotCacheTTL     time.Duration
-	RedisRecoverOpen     bool
-	ShutdownTimeout      time.Duration
-	ReadTimeout          time.Duration
-	WriteTimeout         time.Duration
-	IdleTimeout          time.Duration
-	RateLimitRPS         int
+	Port             string
+	MetricsPort      string
+	RedisAddr        string
+	RedisPassword    string
+	RedisDB          int
+	SnapshotCacheTTL time.Duration
+	RedisRecoverOpen bool
+	ShutdownTimeout  time.Duration
+	ReadTimeout      time.Duration
+	WriteTimeout     time.Duration
+	IdleTimeout      time.Duration
+	RateLimitRPS     int
 }
 
 func loadConfig() Config {

@@ -16,10 +16,10 @@ import (
 )
 
 type Handler struct {
-	engine             *orderbook.Engine
-	cache              *redis.Client
-	snapshotCacheTTL   time.Duration
-	store              *persistence.RedisStore
+	engine           *orderbook.Engine
+	cache            *redis.Client
+	snapshotCacheTTL time.Duration
+	store            *persistence.RedisStore
 }
 
 func New(engine *orderbook.Engine, cache *redis.Client, snapshotCacheTTL time.Duration, store *persistence.RedisStore) *Handler {

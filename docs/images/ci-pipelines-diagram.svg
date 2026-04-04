@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 580" font-family="system-ui, -apple-system, sans-serif" font-size="13">
+  <defs>
+    <filter id="shadow" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="1" stdDeviation="2" flood-opacity="0.1"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a0aec0"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="580" fill="#f8f9fa" rx="8"/>
+
+  <!-- Left panel: Infrastructure -->
+  <rect x="20" y="15" width="370" height="550" rx="8" fill="#ffffff" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="205" y="45" text-anchor="middle" fill="#2d3748" font-weight="700" font-size="16">ci-infrastructure.yml</text>
+  <text x="205" y="63" text-anchor="middle" fill="#a0aec0" font-size="11">infrastructure/terraform/**</text>
+
+  <!-- Infra: Security scan -->
+  <rect x="105" y="85" width="200" height="44" rx="22" fill="#c53030" filter="url(#shadow)"/>
+  <text x="205" y="104" text-anchor="middle" fill="white" font-weight="600" font-size="13">infra-security</text>
+  <text x="205" y="120" text-anchor="middle" fill="#fed7d7" font-size="10">tfsec + checkov</text>
+
+  <!-- Arrow -->
+  <line x1="205" y1="129" x2="205" y2="155" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Infra: Plan -->
+  <rect x="105" y="160" width="200" height="44" rx="22" fill="#4a7fb5" filter="url(#shadow)"/>
+  <text x="205" y="179" text-anchor="middle" fill="white" font-weight="600">plan</text>
+  <text x="205" y="195" text-anchor="middle" fill="#d4e4f7" font-size="10">PR: comment on PR</text>
+
+  <!-- Arrow -->
+  <line x1="205" y1="204" x2="205" y2="230" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Infra: Apply -->
+  <rect x="105" y="235" width="200" height="44" rx="22" fill="#2d3748" filter="url(#shadow)"/>
+  <text x="205" y="254" text-anchor="middle" fill="white" font-weight="600">apply</text>
+  <text x="205" y="270" text-anchor="middle" fill="#a0aec0" font-size="10">main: manual approval</text>
+
+  <!-- Infra features list -->
+  <rect x="55" y="305" width="300" height="115" rx="6" fill="#edf2f7"/>
+  <text x="75" y="328" fill="#4a5568" font-size="11" font-weight="600">Safety controls:</text>
+  <text x="75" y="348" fill="#718096" font-size="11">- tfsec: open SGs, public buckets, no encryption</text>
+  <text x="75" y="365" fill="#718096" font-size="11">- checkov: CIS benchmark compliance</text>
+  <text x="75" y="382" fill="#718096" font-size="11">- Plan diff posted as PR comment</text>
+  <text x="75" y="399" fill="#718096" font-size="11">- Manual approval gate (GitHub Environment)</text>
+  <text x="75" y="416" fill="#718096" font-size="11">- Serialized applies (concurrency group)</text>
+
+  <!-- Right panel: Application -->
+  <rect x="430" y="15" width="370" height="550" rx="8" fill="#ffffff" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="615" y="45" text-anchor="middle" fill="#2d3748" font-weight="700" font-size="16">ci-application.yml</text>
+  <text x="615" y="63" text-anchor="middle" fill="#a0aec0" font-size="11">application/**, Dockerfile, go.mod</text>
+
+  <!-- App: Lint, Test, Security (parallel) -->
+  <rect x="450" y="85" width="105" height="44" rx="22" fill="#38a169" filter="url(#shadow)"/>
+  <text x="503" y="104" text-anchor="middle" fill="white" font-weight="600" font-size="12">lint</text>
+  <text x="503" y="119" text-anchor="middle" fill="#c6f6d5" font-size="9">gosec, govulncheck</text>
+
+  <rect x="563" y="85" width="105" height="44" rx="22" fill="#38a169" filter="url(#shadow)"/>
+  <text x="616" y="104" text-anchor="middle" fill="white" font-weight="600" font-size="12">test</text>
+  <text x="616" y="119" text-anchor="middle" fill="#c6f6d5" font-size="9">-race + coverage</text>
+
+  <rect x="676" y="85" width="105" height="44" rx="22" fill="#c53030" filter="url(#shadow)"/>
+  <text x="729" y="104" text-anchor="middle" fill="white" font-weight="600" font-size="12">security</text>
+  <text x="729" y="119" text-anchor="middle" fill="#fed7d7" font-size="9">Trivy CVE scan</text>
+
+  <!-- Arrows from parallel to build -->
+  <line x1="503" y1="129" x2="615" y2="155" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="616" y1="129" x2="615" y2="155" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="729" y1="129" x2="615" y2="155" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- App: Build -->
+  <rect x="515" y="160" width="200" height="44" rx="22" fill="#4a7fb5" filter="url(#shadow)"/>
+  <text x="615" y="179" text-anchor="middle" fill="white" font-weight="600">build</text>
+  <text x="615" y="195" text-anchor="middle" fill="#d4e4f7" font-size="10">GHCR push + Cosign + SBOM</text>
+
+  <!-- Arrow -->
+  <line x1="615" y1="204" x2="615" y2="230" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- App: Rollout -->
+  <rect x="515" y="235" width="200" height="44" rx="22" fill="#2d3748" filter="url(#shadow)"/>
+  <text x="615" y="254" text-anchor="middle" fill="white" font-weight="600">rollout</text>
+  <text x="615" y="270" text-anchor="middle" fill="#a0aec0" font-size="10">main: manual approval</text>
+
+  <!-- Rollout features list -->
+  <rect x="465" y="305" width="300" height="145" rx="6" fill="#edf2f7"/>
+  <text x="485" y="328" fill="#4a5568" font-size="11" font-weight="600">Rollout verification:</text>
+  <text x="485" y="348" fill="#718096" font-size="11">1. kustomize apply (image pinned by digest)</text>
+  <text x="485" y="365" fill="#718096" font-size="11">2. rollout wait (maxUnavailable=0)</text>
+  <text x="485" y="382" fill="#718096" font-size="11">3. /readyz on every pod</text>
+  <text x="485" y="399" fill="#718096" font-size="11">4. /healthz liveness check</text>
+  <text x="485" y="416" fill="#718096" font-size="11">5. Smoke test (place + cancel order)</text>
+  <text x="485" y="433" fill="#718096" font-size="11">6. Auto-rollback on any failure</text>
+  <text x="485" y="446" fill="#718096" font-size="11">7. Slack notification</text>
+
+  <!-- Footer: order -->
+  <rect x="20" y="475" width="780" height="50" rx="6" fill="#edf2f7"/>
+  <text x="410" y="497" text-anchor="middle" fill="#2d3748" font-weight="600" font-size="13">Deploy order: infrastructure first, application second.</text>
+  <text x="410" y="515" text-anchor="middle" fill="#718096" font-size="11">If both change, merge the infra PR first. The application deploy assumes the cluster already exists.</text>
+
+  <!-- AWS OIDC badge -->
+  <rect x="290" y="540" width="240" height="26" rx="13" fill="#e2e8f0"/>
+  <text x="410" y="558" text-anchor="middle" fill="#4a5568" font-size="11" font-weight="600">AWS OIDC federation - no long-lived secrets</text>
+</svg>

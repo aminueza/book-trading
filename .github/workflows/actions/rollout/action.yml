@@ -1,0 +1,312 @@
+name: "Kubernetes Safe Rollout"
+description: "Deploy application to EKS via kustomize with health verification and automatic rollback"
+
+inputs:
+  aws-role-arn:
+    description: "AWS IAM Role ARN to assume via OIDC"
+    required: true
+  aws-region:
+    description: "AWS Region"
+    required: false
+    default: "us-east-1"
+  cluster-name:
+    description: "EKS cluster name"
+    required: true
+  namespace:
+    description: "Kubernetes namespace"
+    required: false
+    default: "trading"
+  kustomize-overlay:
+    description: "Path to kustomize overlay directory"
+    required: true
+  image-name:
+    description: "Current kustomize image name to replace (e.g., orderbook-service)"
+    required: true
+  image-ref:
+    description: "Full image reference with digest (e.g., ghcr.io/org/repo@sha256:...)"
+    required: true
+  deployment-name:
+    description: "Kubernetes Deployment name to monitor"
+    required: false
+    default: "orderbook"
+  app-label:
+    description: "Label selector for pods (app.kubernetes.io/name value)"
+    required: false
+    default: "orderbook"
+  app-port:
+    description: "Container port for health checks"
+    required: false
+    default: "8080"
+  rollout-timeout:
+    description: "Timeout for rollout status check"
+    required: false
+    default: "300s"
+  slack-webhook-url:
+    description: "Slack webhook URL for deploy notifications (optional)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: "AWS Login (OIDC)"
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: "Configure kubectl for EKS"
+      shell: bash
+      env:
+        CLUSTER: ${{ inputs.cluster-name }}
+        REGION: ${{ inputs.aws-region }}
+      run: |
+        aws eks update-kubeconfig \
+          --name "$CLUSTER" \
+          --region "$REGION" \
+          --alias "$CLUSTER"
+        echo "Connected to EKS cluster:"
+        kubectl cluster-info
+
+    - name: "Pin image digest in kustomize overlay"
+      shell: bash
+      working-directory: ${{ inputs.kustomize-overlay }}
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        kustomize edit set image "${IMAGE_NAME}=${IMAGE_REF}"
+        echo "Image pinned to: ${IMAGE_REF}"
+        kustomize build . | grep "image:" || true
+
+    - name: "Pre-deploy snapshot"
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        DEPLOY: ${{ inputs.deployment-name }}
+        LABEL: ${{ inputs.app-label }}
+      run: |
+        echo "=== Current deployment state ==="
+        kubectl get "deployment/${DEPLOY}" -n "$NS" -o wide 2>/dev/null || echo "No existing deployment"
+        echo ""
+        echo "=== Current pods ==="
+        kubectl get pods -n "$NS" -l "app.kubernetes.io/name=${LABEL}" -o wide 2>/dev/null || true
+
+    - name: "Apply kustomize overlay"
+      shell: bash
+      env:
+        OVERLAY: ${{ inputs.kustomize-overlay }}
+      run: |
+        kubectl apply -k "$OVERLAY" \
+          --server-side --force-conflicts \
+          --field-manager=ci-deploy
+        echo "Kustomize applied."
+
+    - name: "Wait for rollout"
+      id: rollout
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        DEPLOY: ${{ inputs.deployment-name }}
+        TIMEOUT: ${{ inputs.rollout-timeout }}
+      run: |
+        echo "Waiting for rolling update to complete..."
+        echo "Strategy: maxSurge=1, maxUnavailable=0 (zero-downtime)"
+        echo ""
+        if ! kubectl rollout status "deployment/${DEPLOY}" \
+          -n "$NS" --timeout="$TIMEOUT"; then
+          echo "::error::Rollout failed or timed out"
+          exit 1
+        fi
+        echo "All pods updated and ready."
+
+    - name: "Verify readiness (/readyz)"
+      id: readyz
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        LABEL: ${{ inputs.app-label }}
+        PORT: ${{ inputs.app-port }}
+      run: |
+        echo "Checking readiness endpoint on all pods..."
+        PODS=$(kubectl get pods -n "$NS" \
+          -l "app.kubernetes.io/name=${LABEL}" \
+          -o jsonpath='{.items[*].metadata.name}')
+
+        FAILED=0
+        LOCAL_PORT=18080
+        for POD in $PODS; do
+          kubectl port-forward -n "$NS" "$POD" "${LOCAL_PORT}:${PORT}" &
+          PF_PID=$!
+          sleep 2
+
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+            --max-time 10 "http://localhost:${LOCAL_PORT}/readyz" || echo "000")
+          kill $PF_PID 2>/dev/null || true
+          wait $PF_PID 2>/dev/null || true
+
+          if [ "$STATUS" = "200" ]; then
+            echo "  $POD: /readyz OK (HTTP $STATUS)"
+          else
+            echo "::error::$POD: /readyz FAILED (HTTP $STATUS)"
+            FAILED=1
+          fi
+          LOCAL_PORT=$((LOCAL_PORT + 1))
+        done
+
+        if [ "$FAILED" = "1" ]; then
+          exit 1
+        fi
+        echo "All pods passed readiness check."
+
+    - name: "Verify liveness (/healthz)"
+      id: healthz
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        LABEL: ${{ inputs.app-label }}
+        PORT: ${{ inputs.app-port }}
+      run: |
+        POD=$(kubectl get pods -n "$NS" \
+          -l "app.kubernetes.io/name=${LABEL}" \
+          -o jsonpath='{.items[0].metadata.name}')
+
+        kubectl port-forward -n "$NS" "$POD" "18090:${PORT}" &
+        PF_PID=$!
+        sleep 2
+
+        HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+          --max-time 10 http://localhost:18090/healthz || echo "000")
+        kill $PF_PID 2>/dev/null || true
+
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "::error::Liveness check failed (HTTP $HTTP_CODE)"
+          exit 1
+        fi
+        echo "Liveness check passed (HTTP $HTTP_CODE)."
+
+    - name: "Smoke test (place + cancel order)"
+      id: smoke
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        LABEL: ${{ inputs.app-label }}
+        PORT: ${{ inputs.app-port }}
+      run: |
+        POD=$(kubectl get pods -n "$NS" \
+          -l "app.kubernetes.io/name=${LABEL}" \
+          -o jsonpath='{.items[0].metadata.name}')
+
+        kubectl port-forward -n "$NS" "$POD" "18091:${PORT}" &
+        PF_PID=$!
+        sleep 2
+
+        # Place an order and verify 201
+        RESP=$(curl -s -w '\n%{http_code}' --max-time 10 \
+          -X POST http://localhost:18091/api/v1/orders \
+          -H "Content-Type: application/json" \
+          -d '{"pair":"SMOKE-TEST","side":"buy","price":1.0,"quantity":1.0}')
+        HTTP_CODE=$(echo "$RESP" | tail -1)
+        BODY=$(echo "$RESP" | head -1)
+
+        if [ "$HTTP_CODE" != "201" ]; then
+          echo "::error::Smoke test: POST /orders returned HTTP $HTTP_CODE"
+          kill $PF_PID 2>/dev/null || true
+          exit 1
+        fi
+
+        # Extract order ID and cancel it (cleanup)
+        ORDER_ID=$(echo "$BODY" | jq -r '.data.order.id // empty')
+        if [ -n "$ORDER_ID" ]; then
+          curl -s -o /dev/null --max-time 10 \
+            -X DELETE "http://localhost:18091/api/v1/orders/${ORDER_ID}?pair=SMOKE-TEST"
+        fi
+
+        kill $PF_PID 2>/dev/null || true
+        echo "Smoke test passed: order placed (201) and cancelled."
+
+    # --- Rollback on any failure ---
+
+    - name: "Rollback on failure"
+      if: failure()
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        DEPLOY: ${{ inputs.deployment-name }}
+        LABEL: ${{ inputs.app-label }}
+      run: |
+        echo "::warning::Deploy verification failed — rolling back to previous revision"
+        kubectl rollout undo "deployment/${DEPLOY}" -n "$NS"
+        kubectl rollout status "deployment/${DEPLOY}" -n "$NS" --timeout=120s
+        echo ""
+        echo "Rollback complete. Current pods:"
+        kubectl get pods -n "$NS" -l "app.kubernetes.io/name=${LABEL}" -o wide
+        echo ""
+        echo "::error::Deploy rolled back. Investigate the failure before retrying."
+
+    # --- Summary ---
+
+    - name: "Generate Summary"
+      if: always()
+      shell: bash
+      env:
+        CLUSTER: ${{ inputs.cluster-name }}
+        NS: ${{ inputs.namespace }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+        LABEL: ${{ inputs.app-label }}
+        ROLLOUT: ${{ steps.rollout.outcome }}
+        READYZ: ${{ steps.readyz.outcome }}
+        HEALTHZ: ${{ steps.healthz.outcome }}
+        SMOKE: ${{ steps.smoke.outcome }}
+      run: |
+        {
+          echo "### Application Rollout Summary"
+          echo ""
+          echo "| Step | Status |"
+          echo "|------|--------|"
+          echo "| Cluster | \`${CLUSTER}\` |"
+          echo "| Namespace | \`${NS}\` |"
+          echo "| Image | \`${IMAGE_REF}\` |"
+          echo "| Rollout | $([[ "$ROLLOUT" == "success" ]] && echo "Passed" || echo "${ROLLOUT:-skipped}") |"
+          echo "| Readiness (/readyz) | $([[ "$READYZ" == "success" ]] && echo "Passed" || echo "${READYZ:-skipped}") |"
+          echo "| Liveness (/healthz) | $([[ "$HEALTHZ" == "success" ]] && echo "Passed" || echo "${HEALTHZ:-skipped}") |"
+          echo "| Smoke test | $([[ "$SMOKE" == "success" ]] && echo "Passed" || echo "${SMOKE:-skipped}") |"
+          echo ""
+          echo "#### Pod Status"
+          echo '```'
+          kubectl get pods -n "$NS" -l "app.kubernetes.io/name=${LABEL}" \
+            -o wide 2>/dev/null || echo "(unable to fetch)"
+          echo '```'
+        } >> $GITHUB_STEP_SUMMARY
+
+    - name: "Notify deploy result"
+      if: always() && inputs.slack-webhook-url != ''
+      shell: bash
+      env:
+        WEBHOOK: ${{ inputs.slack-webhook-url }}
+        CLUSTER: ${{ inputs.cluster-name }}
+        NS: ${{ inputs.namespace }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+        ROLLOUT: ${{ steps.rollout.outcome }}
+        SMOKE: ${{ steps.smoke.outcome }}
+      run: |
+        if [[ "$ROLLOUT" == "success" && "$SMOKE" == "success" ]]; then
+          COLOR="#36a64f"
+          STATUS="Deployed successfully"
+        else
+          COLOR="#dc3545"
+          STATUS="Deploy failed (rolled back)"
+        fi
+
+        curl -sf "$WEBHOOK" -X POST -H 'Content-type: application/json' -d "{
+          \"attachments\": [{
+            \"color\": \"${COLOR}\",
+            \"title\": \"${STATUS}: ${NS} on ${CLUSTER}\",
+            \"fields\": [
+              {\"title\": \"Image\", \"value\": \"\`${IMAGE_REF##*@}\`\", \"short\": true},
+              {\"title\": \"Smoke test\", \"value\": \"${SMOKE:-skipped}\", \"short\": true}
+            ],
+            \"footer\": \"GitHub Actions\",
+            \"ts\": $(date +%s)
+          }]
+        }" || echo "Slack notification failed (non-blocking)"

@@ -1,161 +1,175 @@
 # Security Self-Review
 
-A critical review of this submission's security posture, identifying the most significant risks, realistic attack scenarios, and a prioritized hardening roadmap.
+A critical review of this submission's security posture: threat model, five most significant risks, compliance considerations, and a prioritized hardening roadmap.
+
+---
+
+## Threat Model
+
+### System Context
+
+The order book service accepts untrusted HTTP requests from external clients, matches buy and sell orders in memory, and persists events to Redis. It runs as a containerized workload on Kubernetes behind an Istio service mesh.
+
+![Threat model: client through trust boundary to Istio, orderbook pod, Redis, with observability and CI runner](images/threat-model.svg)
+
+**Trust boundaries:**
+1. Istio gateway → orderbook pod (external traffic enters the mesh)
+2. orderbook pod → Redis (application talks to its data store)
+3. CI runner → EKS cluster (deployment pipeline pushes changes)
+
+### Assets
+
+| Asset | Sensitivity | Location |
+|-------|------------|----------|
+| Open orders (bids/asks) | High — manipulation affects market pricing | In-memory (`engine.books`) |
+| Trade history | High — regulatory audit trail | In-memory + Redis journal |
+| Order book snapshots | Medium — reveals market depth to competitors | Redis cache (100ms TTL) |
+| Redis credentials | High — grants access to journal and cache | K8s Secret / docker-compose env |
+| Container images | High — tampered image = full compromise | GHCR registry |
+| EKS kubeconfig | Critical — cluster admin access | CI pipeline (OIDC, ephemeral) |
+
+### Threat Actors
+
+| Actor | Capability | Goal |
+|-------|-----------|------|
+| External attacker | Network access to the API endpoint | Manipulate orders, exfiltrate book data, deny service |
+| Compromised CI runner | Push images, access deploy secrets | Supply chain attack — deploy malicious image |
+| Insider (malicious or careless) | kubectl access, Git push | Modify orders, exfiltrate data, misconfigure infra |
+| Adjacent pod (compromised neighbor) | Same-cluster network access | Lateral movement to orderbook or Redis |
+
+### STRIDE Analysis
+
+| Threat | Vector | Current Mitigation | Gap |
+|--------|--------|-------------------|-----|
+| **Spoofing** | Unauthenticated API — anyone can impersonate any trader | NetworkPolicy limits ingress to Istio gateway only | No identity verification (Risk 1) |
+| **Tampering** | Push malicious container image to registry | CI builds with Cosign signing support, SBOM generation | Signing not enforced, no admission controller (Risk 4) |
+| **Repudiation** | Modify or delete Redis journal entries after trades | Journal uses `LPUSH` + `LTRIM` (append pattern) | Journal is mutable by anyone with Redis access — not tamper-proof |
+| **Information Disclosure** | Read full order book depth via `GET /orderbook/{pair}` | Rate limiting (1000 RPS per IP) | No authentication — any client can read market depth |
+| **Denial of Service** | Flood orders to exhaust memory or CPU | Per-IP rate limit, HPA auto-scaling, PDB | Rate limit is per-pod, bypassed by N replicas (Risk 5) |
+| **Elevation of Privilege** | Container escape → host access | Nonroot, read-only FS, drop ALL caps, seccomp RuntimeDefault | Strong posture — next step: AppArmor + PodSecurity admission |
+
+---
 
 ## Five Most Significant Risks
 
-### Risk 1: No Authentication or Authorization on API Endpoints
+### Risk 1: No Authentication or Authorization (Critical)
 
-**Severity: Critical**
+All API endpoints are unauthenticated. Any client with network access can place orders, cancel orders, and read the full order book.
 
-All API endpoints (`POST /api/v1/orders`, `DELETE /api/v1/orders/{id}`, `GET /api/v1/orderbook/{pair}`, `GET /api/v1/trades/{pair}`) are unauthenticated. Any client that can reach the service can place orders, cancel orders, and read the full order book.
+**Attack scenario:** An attacker places thousands of fake orders at extreme prices to manipulate the visible book (spoofing/layering), then cancels them before execution. No identity is recorded, so attribution is impossible.
 
-**What an attacker could exploit:**
-- Place thousands of fake orders to manipulate the visible order book (spoofing/layering).
-- Cancel other users' orders if they can guess or enumerate order IDs (UUIDs are not guessable, but the API returns order IDs in responses).
-- Read the full order book depth to front-run legitimate orders.
-- Flood the service with orders to exhaust the in-memory book and rate limiter budget.
+**Existing mitigations:**
+- NetworkPolicy restricts API ingress to Istio gateway — no direct pod access from other namespaces.
+- Per-IP rate limiting (1000 RPS) in middleware limits automated abuse volume.
+- UUIDs for order IDs are not guessable, limiting cross-user cancellation.
 
-**Mitigating factors already in place:**
-- NetworkPolicy restricts API access to traffic arriving through the Istio gateway. Direct pod-to-pod access from other namespaces is blocked.
-- Per-IP rate limiting (1000 RPS default) in middleware limits the blast radius of automated abuse.
-- Istio can be configured with `RequestAuthentication` and `AuthorizationPolicy` without modifying application code.
+**Hardening:**
+1. Add Istio `RequestAuthentication` with JWT validation at the gateway.
+2. Add `AuthorizationPolicy` restricting `DELETE /orders/{id}` to the token subject.
+3. For a real exchange: integrate with an identity provider (Keycloak/Auth0) issuing short-lived tokens with trading permissions.
 
-**What I would harden first:**
-1. Add Istio `RequestAuthentication` with JWT validation at the gateway. The application itself does not need to parse tokens; Istio's sidecar handles this before the request reaches the pod.
-2. Add `AuthorizationPolicy` to restrict `DELETE /api/v1/orders/{id}` to the token's subject, preventing cross-user cancellation.
-3. For a real exchange, integrate with an identity provider (Keycloak, Auth0) that issues short-lived tokens with claims for trading permissions.
+### Risk 2: In-Memory State with No Write-Ahead Log (High)
 
-### Risk 2: In-Memory Order Book with No Write-Ahead Log
+The matching engine holds all order state in memory. If the pod is killed (OOMKill, node failure, deploy), all open orders are lost.
 
-**Severity: High**
+Redis persistence exists but is best-effort: journal writes are fire-and-forget, and recovery is disabled in multi-replica mode to avoid duplicate orders.
 
-The matching engine stores all order state in memory (`engine.go`, `books map[string]*book`). If the pod is killed (OOMKill, node failure, deploy rollback), all open orders and the current book state are lost.
+**Attack scenario:** An attacker triggers OOMKill (e.g., placing orders with extremely long pair names if validation is insufficient) to erase the order book. More commonly, this is an availability risk rather than a security one.
 
-The Redis persistence layer (`persistence/redis.go`) writes a journal and order snapshots, but:
-- `ORDERBOOK_REDIS_RECOVER` is set to `false` in the production ConfigMap (correctly, because with 3 replicas, recovery would create duplicate orders across pods).
-- The journal write is fire-and-forget: if Redis is unavailable, the order is still processed but not persisted. There is no guarantee that the journal is complete.
-- There is no write-ahead log (WAL) pattern where persistence is confirmed before the client receives a response.
+**Hardening:**
+1. Implement a WAL using Redis Streams — write event to stream and await acknowledgment before responding to client.
+2. For multi-replica: leader election via Kubernetes lease, followers replay stream for hot standby.
 
-**What an attacker could exploit:**
-- This is less of an attack vector and more of a reliability gap. However, an attacker who can cause pod restarts (e.g., by triggering OOMKill through large orders) would erase the order book.
+### Risk 3: Secrets Management (High)
 
-**What I would harden first:**
-1. Implement a WAL using Redis Streams (or Kafka in a larger system). Write the order event to the stream and receive acknowledgment before processing the match and responding to the client.
-2. For multi-replica deployments, designate a leader (via Kubernetes lease or etcd election) that processes matches, with followers replaying the stream for hot standby.
+- `docker-compose.yml` contains `REDIS_PASSWORD=compose-local-dev-only` in plaintext, committed to version control.
+- Kubernetes uses `secretKeyRef` (optional: true) but secrets are created manually — no rotation, no audit trail.
+- CI uses `GITHUB_TOKEN` (scoped, fine) but the deploy role ARN is a long-lived secret reference.
 
-### Risk 3: Secrets Management
+**Attack scenario:** Repository compromise exposes the docker-compose Redis password. In K8s, anyone with `kubectl get secret` in the trading namespace can decode the Redis password.
 
-**Severity: High**
+**Hardening:**
+1. Integrate External Secrets Operator to pull from AWS Secrets Manager.
+2. Use OIDC for all CI/CD cloud access (already done for AWS).
+3. Move docker-compose password to `.env` file (gitignored).
 
-Several secrets are handled in ways that would not pass a security audit:
+### Risk 4: Container Image Supply Chain Not Enforced (Medium)
 
-1. **docker-compose.yml** contains `REDIS_PASSWORD=compose-local-dev-only` in plaintext. While this is clearly labeled as development-only, the file is committed to version control. An auditor would flag this regardless of intent.
+CI supports Cosign signing and SBOM generation, but signing is optional (not configured in the workflow invocation) and no admission controller rejects unsigned images.
 
-2. **Kubernetes deployment** references `redis-credentials` Secret via `secretKeyRef` (optional: true), but there is no automated mechanism to create or rotate this secret. In practice, it is created manually (`kubectl create secret`), which means:
-   - No audit trail of who created or last modified the secret.
-   - No automatic rotation.
-   - The secret value is stored in etcd (encrypted at rest if KMS is configured, but accessible to anyone with RBAC read access to secrets in the `trading` namespace).
+**Attack scenario:** Compromise the container registry or CI pipeline. Push a malicious image with a legitimate-looking tag. Pods pulling on restart get the malicious version.
 
-3. **CI pipeline** uses `GITHUB_TOKEN` for container registry authentication. This is a scoped token (fine), but the commented-out deploy job references `ACR_PASSWORD` as a GitHub secret, which is a long-lived credential rather than OIDC federation.
+**Existing mitigations:**
+- Build outputs an immutable digest (`sha256:...`) — the deploy pipeline pins this, not a tag.
+- Trivy scans for known CVEs before push.
+- Distroless base image with no shell limits post-compromise capability.
 
-**What an attacker could exploit:**
-- If the Git repository is compromised, the docker-compose Redis password is exposed. In a real exchange, this could grant access to the cache and persistence journal.
-- If a developer has `kubectl get secret` permissions in the trading namespace, they can decode the Redis password.
-- If the CI runner is compromised and long-lived cloud credentials are in GitHub Secrets, the attacker gets infrastructure access.
+**Hardening:**
+1. Configure Cosign key pair in GitHub Secrets, enable signing in build action.
+2. Deploy Sigstore policy-controller or Kyverno to reject unsigned images in the `trading` namespace.
+3. Pin all base images by digest in the Dockerfile.
 
-**What I would harden first:**
-1. Integrate External Secrets Operator to pull secrets from AWS Secrets Manager. Kubernetes Secrets become a projection of the source of truth, not the source itself.
-2. Use OIDC federation for CI/CD cloud access (GitHub Actions OIDC provider -> AWS IAM role). No long-lived credentials stored in GitHub.
-3. Move the docker-compose password to a `.env` file excluded from version control (`.gitignore` already exists; add `.env` if not present).
+### Risk 5: Per-Pod Rate Limiter Not Distributed (Medium)
 
-### Risk 4: Container Image Supply Chain Not Enforced
+The rate limiter uses an in-memory map per pod. With 3 replicas, an attacker gets 3x the intended rate. Additionally, `RemoteAddr` in Kubernetes resolves to the Istio sidecar IP, not the client — so all traffic may share one bucket or bypass limiting entirely.
 
-**Severity: Medium**
+**Hardening:**
+1. Set `X-Forwarded-For` in Istio and use it as the rate limit key.
+2. Implement rate limiting at the Istio gateway level (EnvoyFilter + external rate limit service backed by Redis).
+3. Keep per-pod limiter as defense in depth at a higher threshold.
 
-The CI pipeline supports Cosign image signing and SBOM generation (`.github/workflows/actions/build/action.yml`), but:
-- The `cosign-key` input is optional and not configured in the workflow invocation.
-- There is no admission controller in the Kubernetes cluster to reject unsigned images.
-- The `imagePullPolicy: IfNotPresent` in the deployment means a cached image could be served even if the registry image is later replaced.
-
-**What an attacker could exploit:**
-- Supply chain attack: compromise the container registry (or CI pipeline) and push a malicious image with a legitimate-looking tag.
-- Tag mutation: push a new image to the `:latest` tag. Pods that restart will pull the new (malicious) image if the cache is invalidated.
-
-**Mitigating factors:**
-- The build action generates an image digest (`sha256:...`) which is immutable. The deploy job (commented out) references this digest, not a tag.
-- The Dockerfile uses a specific base image (`gcr.io/distroless/static-debian12:nonroot`), not `:latest`.
-- Trivy container scanning in CI catches known CVEs before the image is pushed.
-
-**What I would harden first:**
-1. Configure Cosign key pair in GitHub Secrets and enable signing in the build workflow.
-2. Deploy Sigstore policy-controller or Kyverno to reject any image in the `trading` namespace that lacks a valid Cosign signature.
-3. Pin the deployment to image digests rather than tags (the CI already outputs the digest; wire it through to the Kustomize overlay).
-
-### Risk 5: Per-Pod Rate Limiter Is Not Distributed
-
-**Severity: Medium**
-
-The rate limiter in `middleware.go` uses an in-memory `map[string]*rate.Limiter` per pod. With 3 replicas, an attacker sending requests to all pods gets 3x the intended rate limit (3000 RPS instead of 1000 RPS). The Istio load balancer distributes requests across pods, so an attacker does not need to target specific pods.
-
-Additionally:
-- The rate limiter keys on `r.RemoteAddr`, which in a Kubernetes environment is the Istio sidecar's IP (127.0.0.6 or the pod's IP), not the client's real IP. This means all traffic through Istio may share a single rate limit bucket, or conversely, the rate limit may not apply at all if `RemoteAddr` is the local sidecar.
-- The cleanup goroutine (lines 112-123) runs indefinitely with no shutdown mechanism, though this is a minor leak since it is bounded to one goroutine per pod.
-
-**What an attacker could exploit:**
-- DDoS the service at 3x the intended rate, exhausting CPU and memory. The HPA would scale up, but each new pod adds another rate limiter, creating a feedback loop where scaling makes the effective rate limit *higher*.
-- If `RemoteAddr` resolves to the sidecar IP, a single malicious client could lock out all legitimate traffic (all traffic shares one bucket) or bypass rate limiting entirely (the sidecar IP gets its own high-burst bucket).
-
-**What I would harden first:**
-1. Configure Istio to set the `X-Forwarded-For` header and use it as the rate limit key instead of `RemoteAddr`.
-2. Implement rate limiting at the Istio gateway level using EnvoyFilter + an external rate limit service (backed by Redis). This provides a single, consistent rate limit across all replicas.
-3. Keep the per-pod rate limiter as defense in depth, but set it to a higher threshold (e.g., 5000 RPS) that acts as a circuit breaker rather than the primary rate limit.
-
-## Compliance and Audit Considerations
-
-In a real exchange environment, the following would require attention:
-
-| Concern | Current State | Gap |
-|---------|--------------|-----|
-| **Audit trail** | Redis journal captures order events | Journal is not tamper-proof; anyone with Redis access can modify entries. Production: use append-only log (Kafka) with separate read/write permissions. |
-| **Data retention** | Journal capped at 10,000 entries, no expiration on order keys | No defined retention policy. Financial regulations typically require 5-7 years of trade records. |
-| **Encryption in transit** | Istio mTLS (when configured), Redis transit encryption enabled in production | Local development (docker-compose, KinD) runs without TLS. Acceptable for dev, but the gap should be documented. |
-| **Encryption at rest** | EKS secrets encrypted via KMS, ElastiCache at-rest encryption | In-memory order book data is never encrypted. This is standard for in-memory systems, but may need documentation for auditors. |
-| **Access control** | NetworkPolicy + ServiceAccount without token automount | No RBAC for API endpoints (Risk 1). No multi-tenancy isolation. |
-| **Vulnerability management** | Trivy, gosec, govulncheck in CI | No runtime vulnerability scanning (e.g., Falco for container behavior anomalies). |
-
-## Threat Model Summary (STRIDE)
-
-| Threat | Applicability | Mitigation |
-|--------|--------------|------------|
-| **Spoofing** | No identity verification on API | Risk 1: Add JWT/mTLS authentication |
-| **Tampering** | Unsigned container images | Risk 4: Enforce Cosign signatures |
-| **Repudiation** | Redis journal exists but is mutable | Append-only audit log with separate permissions |
-| **Information Disclosure** | Metrics endpoint unauthenticated | NetworkPolicy restricts access to monitoring namespace only. Acceptable risk for internal metrics. |
-| **Denial of Service** | Per-pod rate limit, HPA, PDB | Risk 5: Distributed rate limiting. Also: input validation prevents unbounded payloads (price/quantity must be positive). |
-| **Elevation of Privilege** | Container runs nonroot, read-only FS, all capabilities dropped, seccomp RuntimeDefault | Strong posture. Next step: enable AppArmor profile and use PodSecurity admission (restricted). |
+---
 
 ## What Is Already Done Well
 
-This section exists because a security review that only lists problems gives a distorted picture. The following are genuine security strengths of this implementation:
+A security review that only lists problems gives a distorted picture. These are genuine strengths:
 
-1. **Distroless base image** with no shell and no package manager. An attacker who achieves code execution inside the container has no tools to escalate with.
-2. **Read-only root filesystem** prevents an attacker from writing scripts, modifying binaries, or persisting a backdoor.
-3. **Capabilities drop ALL** with no re-addition. The container cannot use `ptrace`, `chown`, `net_raw`, or any other capability.
-4. **NetworkPolicy deny-all default** with explicit allowlist. An attacker who compromises the pod cannot reach arbitrary services in the cluster.
-5. **Separate metrics port** (9090) from application port (8080) with distinct NetworkPolicy rules. Prometheus scraping is isolated from user traffic.
-6. **Graceful degradation** when Redis is unavailable. The service continues to accept and match orders, just without persistence. This prevents a Redis outage from cascading to a full service outage.
-7. **Input validation** at the handler level rejects negative prices, zero quantities, and invalid sides before they reach the matching engine.
+**Runtime hardening:**
+1. **Distroless image** — no shell, no package manager. An attacker achieving code execution has no tools to escalate.
+2. **Read-only root filesystem** — prevents writing scripts, modifying binaries, or persisting backdoors.
+3. **Drop ALL capabilities** — no `ptrace`, `chown`, `net_raw`, or any other capability.
+4. **Seccomp RuntimeDefault** — restricts syscalls to a safe baseline.
+
+**Network isolation:**
+5. **NetworkPolicy deny-all + allowlist** — only Istio on 8080, Prometheus on 9090, Redis on 6379, DNS on 53. Blocks lateral movement.
+6. **Separate metrics port** — Prometheus scraping is isolated from user traffic via distinct NetworkPolicy rules.
+
+**Application resilience:**
+7. **Graceful degradation** — Redis unavailability does not cascade to service unavailability. Orders are still matched.
+8. **Input validation** — handler rejects negative prices, zero quantities, invalid sides before they reach the engine.
+
+**CI/CD security (shift-left):**
+9. **Infrastructure security scanning** — tfsec and checkov run against Terraform HCL before plan/apply. Catches open security groups, public buckets, disabled encryption during code review, not after the infrastructure is live.
+10. **Application SAST** — gosec scans Go source for security issues (SQL injection patterns, hardcoded credentials, weak crypto). govulncheck checks dependencies against the Go vulnerability database.
+11. **Container scanning** — Trivy scans the built image for known CVEs before it is pushed to the registry.
+12. **OIDC credentials** — CI/CD uses AWS OIDC federation. No long-lived access keys stored in GitHub Secrets.
+13. **SBOM generation** — every image build produces an SPDX Software Bill of Materials attached as a registry attestation. This provides a full inventory of packages and dependencies for post-build vulnerability scanning and audit compliance.
+14. **SLSA provenance** — build provenance attestation records source repo, commit SHA, and builder identity. Establishes a verifiable chain from source to deployed artifact.
+
+---
+
+## Compliance and Audit Considerations
+
+| Concern | Current State | Gap |
+|---------|--------------|-----|
+| **Audit trail** | Redis journal captures order place/cancel events | Not tamper-proof — anyone with Redis access can modify entries. Use append-only log (Kafka) with separate read/write permissions. |
+| **Data retention** | Journal capped at 10,000 entries, no expiration policy | Financial regulations typically require 5-7 years of trade records. |
+| **Encryption in transit** | Istio mTLS (when configured), ElastiCache transit encryption | Local dev (docker-compose, KinD) runs without TLS. Acceptable for dev but should be documented for auditors. |
+| **Encryption at rest** | EKS secrets via KMS, ElastiCache at-rest encryption | In-memory order book is never encrypted. Standard for in-memory systems but may need documentation. |
+| **Access control** | NetworkPolicy + ServiceAccount without token automount | No RBAC on API endpoints. No multi-tenancy isolation. |
+| **Vulnerability management** | Trivy (container CVEs), gosec (SAST), govulncheck (Go deps), tfsec (Terraform), checkov (CIS benchmarks) | No runtime scanning (e.g., Falco for container behavior anomalies). |
+
+---
 
 ## 30-Day Hardening Roadmap
 
-| Priority | Action | Effort | Impact |
-|----------|--------|--------|--------|
-| Week 1 | Enable Cosign signing in CI + deploy policy-controller | 1-2 days | Closes supply chain gap (Risk 4) |
-| Week 1 | Move docker-compose secrets to `.env`, add to `.gitignore` | 1 hour | Removes plaintext secret from VCS (Risk 3) |
-| Week 2 | Add Istio `RequestAuthentication` + `AuthorizationPolicy` | 2-3 days | Closes authentication gap (Risk 1) |
-| Week 2 | Deploy External Secrets Operator, migrate Redis password | 1-2 days | Automates secret lifecycle (Risk 3) |
-| Week 3 | Implement distributed rate limiting at Istio gateway | 2-3 days | Fixes per-pod bypass (Risk 5) |
-| Week 3 | Fix rate limiter to use `X-Forwarded-For` | 2 hours | Correct client identification (Risk 5) |
-| Week 4 | Implement WAL for order persistence | 3-5 days | Closes durability gap (Risk 2) |
-| Week 4 | Deploy Falco for runtime anomaly detection | 1-2 days | Adds runtime security layer |
+| Week | Action | Effort | Closes |
+|------|--------|--------|--------|
+| 1 | Enable Cosign signing in CI + deploy admission controller | 1-2 days | Risk 4 |
+| 1 | Move docker-compose secrets to `.env`, add to `.gitignore` | 1 hour | Risk 3 |
+| 2 | Add Istio `RequestAuthentication` + `AuthorizationPolicy` | 2-3 days | Risk 1 |
+| 2 | Deploy External Secrets Operator, migrate Redis password | 1-2 days | Risk 3 |
+| 3 | Implement distributed rate limiting at Istio gateway | 2-3 days | Risk 5 |
+| 3 | Fix rate limiter to use `X-Forwarded-For` | 2 hours | Risk 5 |
+| 4 | Implement WAL for order persistence | 3-5 days | Risk 2 |
+| 4 | Deploy Falco for runtime anomaly detection | 1-2 days | Compliance |

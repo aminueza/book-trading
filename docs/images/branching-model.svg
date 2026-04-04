@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 380" font-family="system-ui, -apple-system, sans-serif" font-size="12">
+  <defs>
+    <filter id="s" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="1" stdDeviation="2" flood-opacity="0.08"/>
+    </filter>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a0aec0"/>
+    </marker>
+  </defs>
+
+  <rect width="700" height="380" fill="#f8f9fa" rx="8"/>
+
+  <!-- Row 1: feature branch → PR → CI -->
+  <rect x="30" y="30" width="130" height="36" rx="18" fill="#4a7fb5" filter="url(#s)"/>
+  <text x="95" y="53" text-anchor="middle" fill="white" font-weight="600">feature branch</text>
+
+  <line x1="162" y1="48" x2="195" y2="48" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="200" y="30" width="110" height="36" rx="18" fill="#4a7fb5" filter="url(#s)"/>
+  <text x="255" y="53" text-anchor="middle" fill="white" font-weight="600">PR to main</text>
+
+  <line x1="312" y1="48" x2="345" y2="48" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <rect x="350" y="25" width="320" height="46" rx="6" fill="#edf2f7" stroke="#d0d8e0" stroke-width="1"/>
+  <text x="510" y="44" text-anchor="middle" fill="#2d3748" font-weight="600" font-size="11">CI runs</text>
+  <text x="510" y="60" text-anchor="middle" fill="#718096" font-size="10">lint  |  test (-race)  |  security (Trivy)  |  build (Cosign)</text>
+
+  <!-- Arrow down: merge -->
+  <line x1="510" y1="71" x2="510" y2="100" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Row 2: merge to main -->
+  <rect x="430" y="105" width="160" height="36" rx="18" fill="#2d3748" filter="url(#s)"/>
+  <text x="510" y="128" text-anchor="middle" fill="white" font-weight="600">merge to main</text>
+
+  <!-- Arrow down -->
+  <line x1="510" y1="141" x2="510" y2="165" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Row 3: deploy triggers -->
+  <rect x="420" y="170" width="180" height="36" rx="18" fill="#4a7fb5" filter="url(#s)"/>
+  <text x="510" y="193" text-anchor="middle" fill="white" font-weight="600">deploy job triggers</text>
+
+  <!-- Arrow down -->
+  <line x1="510" y1="206" x2="510" y2="230" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Row 4: manual approval -->
+  <rect x="410" y="235" width="200" height="36" rx="18" fill="#dd6b20" filter="url(#s)"/>
+  <text x="510" y="258" text-anchor="middle" fill="white" font-weight="600">manual approval gate</text>
+
+  <!-- Arrow down -->
+  <line x1="510" y1="271" x2="510" y2="295" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Row 5: health checks -->
+  <rect x="370" y="300" width="280" height="36" rx="18" fill="#4a7fb5" filter="url(#s)"/>
+  <text x="510" y="323" text-anchor="middle" fill="white" font-weight="600">kustomize apply + health checks</text>
+
+  <!-- Fork: pass / fail -->
+  <!-- Pass branch -->
+  <line x1="440" y1="336" x2="300" y2="355" stroke="#38a169" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="150" y="348" width="148" height="28" rx="14" fill="#38a169" filter="url(#s)"/>
+  <text x="184" y="367" fill="white" font-weight="600" font-size="11">pass</text>
+  <text x="255" y="367" fill="white" font-size="11">→ deployed</text>
+
+  <!-- Fail branch -->
+  <line x1="580" y1="336" x2="620" y2="355" stroke="#c53030" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="525" y="348" width="148" height="28" rx="14" fill="#c53030" filter="url(#s)"/>
+  <text x="559" y="367" fill="white" font-weight="600" font-size="11">fail</text>
+  <text x="630" y="367" fill="white" font-size="11">→ rollback</text>
+
+  <!-- Slack labels -->
+  <text x="90" y="367" fill="#38a169" font-size="10" font-weight="600">Slack: success</text>
+  <text x="518" y="367" fill="white" font-size="10" font-weight="600"></text>
+  <text x="680" y="358" fill="#c53030" font-size="10" font-weight="600">Slack:</text>
+  <text x="680" y="372" fill="#c53030" font-size="10" font-weight="600">failure</text>
+</svg>

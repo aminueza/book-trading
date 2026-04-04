@@ -119,7 +119,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m])) / sum(rate(http_requests_total[1m])) * 100",
+          "expr": "(sum(rate(http_requests_total{status=~\"5..\"}[1m])) or vector(0)) / sum(rate(http_requests_total[1m])) * 100",
           "legendFormat": "5xx error %",
           "refId": "A"
         }

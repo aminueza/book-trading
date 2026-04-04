@@ -1,0 +1,183 @@
+name: "Infrastructure Security Scan"
+description: "Static security analysis for Terraform configurations using tfsec, checkov, and OPA policy checks"
+
+# Catches security regressions before they reach plan/apply:
+#   - tfsec: Terraform-specific misconfigurations (open SGs, public buckets, unencrypted resources)
+#   - checkov: CIS benchmark compliance for AWS resources
+#   - OPA/conftest: Custom policy-as-code rules (optional, via policy directory)
+#
+# These run without cloud credentials — they analyze the HCL files statically.
+# This means they catch problems in the code review, not after the infra is live.
+
+inputs:
+  working-directory:
+    description: "Path to Terraform configuration"
+    required: true
+  tfsec-version:
+    description: "tfsec version"
+    required: false
+    default: "latest"
+  checkov-version:
+    description: "checkov version"
+    required: false
+    default: "latest"
+  severity:
+    description: "Minimum severity to fail on (CRITICAL, HIGH, MEDIUM, LOW)"
+    required: false
+    default: "HIGH"
+  policy-dir:
+    description: "Path to OPA/Rego policy directory for conftest (optional)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    # --- tfsec: Terraform-specific security scanner ---
+    # Ref: https://aquasecurity.github.io/tfsec/
+    - name: "tfsec — Terraform security scan"
+      id: tfsec
+      shell: bash
+      env:
+        WORKING_DIR: ${{ inputs.working-directory }}
+        SEVERITY: ${{ inputs.severity }}
+      run: |
+        echo "Installing tfsec..."
+        curl -sSL https://github.com/aquasecurity/tfsec/releases/download/v1.28.11/tfsec-linux-amd64 -o /tmp/tfsec
+        chmod +x /tmp/tfsec
+
+        echo "Running tfsec on ${WORKING_DIR}..."
+        set +e
+        /tmp/tfsec "${WORKING_DIR}" \
+          --minimum-severity "${SEVERITY}" \
+          --format lovely \
+          --no-color 2>&1 | tee /tmp/tfsec-output.txt
+        TFSEC_EXIT=$?
+        set -e
+
+        # Post results to step summary
+        {
+          echo "### tfsec Results"
+          echo ""
+          if [ $TFSEC_EXIT -eq 0 ]; then
+            echo "No issues found at severity >= ${SEVERITY}"
+          else
+            echo '```'
+            tail -50 /tmp/tfsec-output.txt
+            echo '```'
+          fi
+        } >> $GITHUB_STEP_SUMMARY
+
+        echo "exitcode=$TFSEC_EXIT" >> $GITHUB_OUTPUT
+        if [ $TFSEC_EXIT -ne 0 ]; then
+          echo "::error::tfsec found security issues at severity >= ${SEVERITY}"
+          exit 1
+        fi
+
+    # --- checkov: CIS/compliance scanner ---
+    # Ref: https://www.checkov.io/
+    - name: "checkov — CIS benchmark compliance"
+      id: checkov
+      shell: bash
+      env:
+        WORKING_DIR: ${{ inputs.working-directory }}
+        SEVERITY: ${{ inputs.severity }}
+      run: |
+        echo "Installing checkov..."
+        pip3 install -q checkov 2>/dev/null || pip install -q checkov
+
+        echo "Running checkov on ${WORKING_DIR}..."
+        set +e
+        checkov \
+          --directory "${WORKING_DIR}" \
+          --framework terraform \
+          --check "${SEVERITY}" \
+          --compact \
+          --quiet \
+          --output cli 2>&1 | tee /tmp/checkov-output.txt
+        CHECKOV_EXIT=$?
+        set -e
+
+        {
+          echo "### checkov Results"
+          echo ""
+          if [ $CHECKOV_EXIT -eq 0 ]; then
+            echo "All CIS checks passed"
+          else
+            echo '```'
+            tail -50 /tmp/checkov-output.txt
+            echo '```'
+          fi
+        } >> $GITHUB_STEP_SUMMARY
+
+        echo "exitcode=$CHECKOV_EXIT" >> $GITHUB_OUTPUT
+        if [ $CHECKOV_EXIT -ne 0 ]; then
+          echo "::warning::checkov found compliance issues (non-blocking — review output)"
+        fi
+      # checkov is advisory, not blocking — some checks are too strict for all contexts.
+      # tfsec is the hard gate.
+      continue-on-error: true
+
+    # --- conftest: Custom OPA policy checks (optional) ---
+    # Ref: https://www.conftest.dev/
+    - name: "conftest — Custom policy checks"
+      id: conftest
+      if: ${{ inputs.policy-dir != '' }}
+      shell: bash
+      env:
+        WORKING_DIR: ${{ inputs.working-directory }}
+        POLICY_DIR: ${{ inputs.policy-dir }}
+      run: |
+        echo "Installing conftest..."
+        CONFTEST_VERSION="0.46.0"
+        curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
+          | tar xz -C /tmp conftest
+
+        echo "Running conftest with policies from ${POLICY_DIR}..."
+        set +e
+        /tmp/conftest test "${WORKING_DIR}" \
+          --policy "${POLICY_DIR}" \
+          --all-namespaces 2>&1 | tee /tmp/conftest-output.txt
+        CONFTEST_EXIT=$?
+        set -e
+
+        {
+          echo "### conftest Results"
+          echo ""
+          if [ $CONFTEST_EXIT -eq 0 ]; then
+            echo "All custom policies passed"
+          else
+            echo '```'
+            cat /tmp/conftest-output.txt
+            echo '```'
+          fi
+        } >> $GITHUB_STEP_SUMMARY
+
+        if [ $CONFTEST_EXIT -ne 0 ]; then
+          echo "::error::conftest policy violations found"
+          exit 1
+        fi
+
+    # --- Summary ---
+    - name: "Generate Summary"
+      if: always()
+      shell: bash
+      env:
+        TFSEC: ${{ steps.tfsec.outcome }}
+        CHECKOV: ${{ steps.checkov.outcome }}
+        CONFTEST: ${{ steps.conftest.outcome }}
+        WORKING_DIR: ${{ inputs.working-directory }}
+      run: |
+        {
+          echo "### Infrastructure Security Summary"
+          echo ""
+          echo "| Scanner | Status | Blocking |"
+          echo "|---------|--------|----------|"
+          echo "| tfsec | $([[ "$TFSEC" == "success" ]] && echo "Passed" || echo "Failed") | Yes |"
+          echo "| checkov | $([[ "$CHECKOV" == "success" ]] && echo "Passed" || echo "Issues found") | No (advisory) |"
+          if [ -n "$CONFTEST" ]; then
+            echo "| conftest | $([[ "$CONFTEST" == "success" ]] && echo "Passed" || echo "Failed") | Yes |"
+          fi
+          echo ""
+          echo "Scanned: \`${WORKING_DIR}\`"
+        } >> $GITHUB_STEP_SUMMARY

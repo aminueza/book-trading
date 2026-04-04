@@ -1,228 +1,161 @@
 # Order Book Trading Service
 
-A production-grade limit order book service built in Go, designed for low-latency order matching with full observability, Kubernetes orchestration, and infrastructure-as-code provisioning.
+A low-latency limit order book with price-time priority matching, built in Go. Designed for operational maturity: containerized on distroless, orchestrated on Kubernetes with zero-downtime deploys, provisioned via Terraform, observed through Prometheus/Grafana/OpenTelemetry, and deployed through a CI/CD pipeline with automated health verification and rollback.
+
+---
 
 ## Assumptions
 
-- **In-memory matching engine**: Order book state lives in memory for microsecond-level matching. A production system would add a write-ahead log (WAL) for durability; this is explicitly scoped out (see [Security Review](docs/security-review.md), Risk 2).
-- **Single-region scope**: The Kubernetes and Terraform configurations target a single AWS region (us-east-1). Multi-region failover is discussed in the [Hybrid Migration](docs/hybrid-migration.md) design note.
-- **Redis as cache + journal, not primary store**: Redis provides snapshot caching (100ms TTL) and a best-effort event journal for audit and recovery. It is not the source of truth for order state.
-- **KinD for local development**: The local environment runs on a single-node KinD cluster. Production targets EKS with multi-AZ node groups.
-- **Istio service mesh**: Traffic routing, mTLS (in production), and canary capabilities are provided by Istio. The local environment installs Istio for routing fidelity.
-- **No authentication on API**: Endpoints are unauthenticated in this implementation. In production, Istio `RequestAuthentication` + `AuthorizationPolicy` would enforce JWT/mTLS. This is documented as Risk 1 in the security review.
+- **In-memory matching engine** — no write-ahead log. Production would add a WAL backed by Redis Streams or Kafka before acknowledging the client. This tradeoff is documented in [Security Review, Risk 2](docs/security-review.md).
+- **Single-region scope** — Kubernetes and Terraform target one AWS region (us-east-1). Multi-region is discussed in [Hybrid Migration](docs/hybrid-migration.md).
+- **Redis as cache + journal, not primary store** — Redis provides snapshot caching (100ms TTL) and a best-effort event journal. The in-memory engine is the source of truth.
+- **No authentication on API** — endpoints are open. Production would use Istio `RequestAuthentication` + `AuthorizationPolicy` with JWT. Documented as [Security Review, Risk 1](docs/security-review.md).
+- **KinD for local, EKS for production** — the local environment runs a single-node KinD cluster. Production targets EKS with multi-AZ node groups.
 
 ## Architecture
 
-```
-                         +------------------+
-                         |   Istio Gateway  |
-                         +--------+---------+
-                                  |
-                    +-------------+-------------+
-                    |             |             |
-              +-----v----+ +-----v----+ +-----v----+
-              | orderbook | | orderbook | | orderbook |
-              |  pod (1)  | |  pod (2)  | |  pod (3)  |
-              +-----+----+ +-----+----+ +-----+----+
-                    |             |             |
-                    +-------------+-------------+
-                                  |
-                          +-------v-------+
-                          |    Redis      |
-                          | (cache/journal)|
-                          +---------------+
+![Architecture: Istio Gateway to 3 orderbook pods to Redis, with Prometheus, Tempo, and Grafana observability](docs/images/architecture-diagram.svg)
 
-  Observability sidecar:
-    Prometheus  <-- scrapes :9090/metrics (http_requests_total, http_request_duration_seconds, http_requests_in_flight)
-    Tempo       <-- receives traces via OTEL Collector (order placement spans, Redis calls)
-    Grafana     <-- dashboards for request rate, latency percentiles, error rate
-```
+### Components
 
-**Key components:**
+| Component | File | Purpose |
+|-----------|------|---------|
+| Matching engine | `application/internal/orderbook/engine.go` | Price-time priority matching with partial fills, thread-safe per pair |
+| HTTP handlers | `application/internal/handler/handler.go` | REST API: place order, cancel, book snapshot, recent trades |
+| Middleware | `application/internal/middleware/middleware.go` | RequestID, structured logging, Prometheus metrics, rate limiting, panic recovery |
+| Health checks | `application/internal/health/` | `/healthz` (liveness), `/readyz` (readiness with Redis check) |
+| Persistence | `application/internal/persistence/redis.go` | Event journal + order snapshots for crash recovery |
+| Tracing | `application/internal/telemetry/tracing.go` | OpenTelemetry with configurable OTLP exporter |
 
-| Component | Purpose | File |
-|-----------|---------|------|
-| Matching engine | Price-time priority order matching with partial fills | `application/internal/orderbook/engine.go` |
-| HTTP handlers | REST API for order placement, cancellation, book snapshots, trades | `application/internal/handler/handler.go` |
-| Middleware stack | RequestID, structured logging, Prometheus metrics, rate limiting, panic recovery | `application/internal/middleware/middleware.go` |
-| Health checks | Liveness (`/healthz`) and readiness (`/readyz` with Redis check) | `application/internal/health/` |
-| Redis persistence | Event journal + order snapshots for recovery | `application/internal/persistence/redis.go` |
-| Tracing | OpenTelemetry integration with configurable OTLP exporter | `application/internal/telemetry/tracing.go` |
+## Build and Run
 
-## How to Build
+**Prerequisites:** Docker, kind, kubectl, helm, opentofu/terraform. Run `make deps-info` for install links or `make install-deps` on macOS.
 
-**Prerequisites:** Docker, kind, kubectl, helm, opentofu (or terraform). Run `make deps-info` for install instructions, or `make install-deps` on macOS with Homebrew.
+### KinD Cluster (Kubernetes)
 
 ```bash
-# Build the container image
-make build
-# Or directly:
-docker build -t orderbook-service:latest .
+make up        # Build image + provision KinD + Istio + Redis + monitoring + deploy
+make validate  # Correctness tests + load test against NodePort
+make down      # Tear down
 ```
 
-The Dockerfile uses a multi-stage build: Go 1.24 builder with static compilation (`CGO_ENABLED=0`, `-trimpath`, `-ldflags="-s -w"`) into a `distroless/static-debian12:nonroot` runtime image. The final image has no shell, no package manager, and runs as UID 65534.
-
-## How to Run
-
-### Option 1: KinD Cluster (Kubernetes)
-
-```bash
-make up
-```
-
-This single command:
-1. Builds the Docker image
-2. Provisions a KinD cluster via Terraform
-3. Installs Istio and Redis (Helm)
-4. Deploys the orderbook service (3 replicas) via Kustomize
-5. Deploys monitoring stack (Prometheus, Grafana, Redis exporter)
-
-**Endpoints after `make up`:**
-- API (NodePort): http://127.0.0.1:8001
+- API: http://127.0.0.1:8001
 - Grafana: http://127.0.0.1:3000 (admin/admin)
-- Optional Istio ingress: `make pf` then http://localhost:8080
+- Istio ingress: `make pf` then http://localhost:8080
 
-Tear down: `make down`
-
-### Option 2: Docker Compose
+### Docker Compose
 
 ```bash
-docker compose up --build
+docker compose up --build   # orderbook + Redis + Prometheus + Grafana + Tempo + OTEL
 ```
 
-Starts: orderbook + Redis + Prometheus + Grafana + Tempo + OTEL Collector.
-
-**Endpoints:**
 - API: http://localhost:8080
-- Grafana: http://localhost:3000 (admin/admin)
-- Prometheus: http://localhost:9091
-- Metrics (direct): http://localhost:9090/metrics
+- Grafana: http://localhost:3000
 
-## How to Deploy (Production)
+## Deploy (Production)
 
-The production Terraform configuration in `infrastructure/terraform/environments/production/` provisions:
+Two independent pipelines: `ci-infrastructure.yml` (Terraform) and `ci-application.yml` (build + deploy). Infrastructure changes deploy first; application changes deploy second. Both require manual approval via GitHub Environments.
 
-- **VPC**: 10.0.0.0/16 with 3 AZs, private subnets for EKS, public subnets for NLB, NAT gateway per AZ
-- **EKS**: Private API endpoint, KMS-encrypted secrets, separate system and trading node groups (c6i.xlarge compute-optimized), IRSA enabled
-- **ElastiCache Redis**: r6g.large with automatic failover, encryption in transit + at rest, 7-day snapshot retention
-- **Monitoring**: CloudWatch log groups (90-day retention), SNS for PagerDuty/Slack alerts
+The application deploy pins the image by digest, applies via kustomize, waits for a zero-downtime rollout, then verifies health (`/readyz`, `/healthz`) and runs a smoke test (place + cancel a real order). If any check fails, the previous revision is automatically restored via `kubectl rollout undo`.
 
-CI pipeline (`.github/workflows/ci-application.yml`):
-1. **Lint**: gofmt, go vet, golangci-lint, gosec (SAST), govulncheck
-2. **Test**: `go test -race ./...`
-3. **Security scan**: Trivy container vulnerability scanning
-4. **Build**: Docker BuildKit with layer caching, Cosign image signing, SBOM generation
-5. **Deploy**: Terraform apply with image digest pinning (requires manual approval gate)
+See **[CI/CD and Production Safety](docs/cicd.md)** for the full pipeline architecture, security gates, deployment safety model, rollback procedures, branching strategy, and secrets flow.
 
-## How to Validate
+## Validate
 
 ```bash
-# Run correctness + load tests against KinD NodePort
-make validate
-
-# Or against Istio ingress (requires make pf in another terminal)
-make validate-istio
-
-# Unit tests with race detector and coverage
-make test
-
-# Load test (requires hey: go install github.com/rakyll/hey@latest)
-make loadtest
+make test           # Unit tests with race detector + coverage
+make validate       # E2E: health, ordering, matching, cancellation, input validation, load test
+make validate-istio # Same, via Istio ingress (requires make pf)
+make loadtest       # 1000 concurrent POSTs via hey
 ```
 
-The validation script (`infrastructure/scripts/validate.sh`) tests:
-- Health check endpoints (liveness + readiness)
-- Order placement and response structure
-- Order matching (buy meets sell)
-- Price-time priority verification
-- Order cancellation
-- Input validation (missing fields, invalid values)
-- Request ID propagation
-- Prometheus metrics endpoint
-- Concurrent load (configurable, default 8000 requests)
-- Latency percentile calculations (p50/p95/p99/max)
+## Key Design Decisions
 
-## Key Design Decisions and Tradeoffs
+### Container
 
-### Container and Runtime
+| Decision | Why |
+|----------|-----|
+| Distroless base (`gcr.io/distroless/static-debian12:nonroot`) | No shell, no package manager — minimal CVE surface. Tradeoff: no exec debugging (use ephemeral containers). |
+| Static binary (`CGO_ENABLED=0`, `-trimpath`, `-ldflags="-s -w"`) | No libc dependency, runs on any Linux, required for distroless. |
+| Read-only filesystem + drop ALL capabilities | Prevents runtime tampering. Even with container escape, no tools to escalate. |
 
-| Decision | Rationale |
-|----------|-----------|
-| Distroless base image | No shell, no package manager = minimal CVE surface. Tradeoff: no exec-into-pod debugging (use ephemeral containers). |
-| Static Go binary (CGO_ENABLED=0) | Eliminates libc dependency; binary runs on any Linux. Required for distroless. |
-| Nonroot user (UID 65534) | Defense in depth. Even if a container escape occurs, the process has no privileges. |
-| Read-only filesystem | Prevents runtime file tampering. Application writes only to stdout/stderr. |
+### Kubernetes
 
-### Kubernetes and Availability
-
-| Decision | Rationale |
-|----------|-----------|
-| CPU request = limit (Guaranteed QoS) | Avoids CFS throttling in latency-sensitive workloads. Pods get dedicated CPU and are last to be evicted under node pressure. |
-| maxSurge=1, maxUnavailable=0 | Zero-downtime deploys. Slower rollout but no requests hit terminating pods. Critical for a trading service. |
-| Topology spread + pod anti-affinity (preferred) | Spreads across zones and nodes for failure resilience. "Preferred" instead of "required" so scheduling works in a degraded cluster. |
-| PDB minAvailable=2 | Tolerates 1 voluntary disruption (node drain, cluster upgrade) without losing quorum. |
-| NetworkPolicy deny-all with explicit allowlist | Zero-trust: only Istio ingress on 8080, only Prometheus on 9090, only Redis on 6379, only DNS on 53. Blocks lateral movement. |
-| HPA scale-down stabilization 300s | Prevents flapping on bursty trading traffic. Scale-up is faster (30s) to handle spikes. |
+| Decision | Why |
+|----------|-----|
+| CPU request = limit (Guaranteed QoS) | Avoids CFS throttling in latency-sensitive workloads. Priority during node pressure. |
+| `maxSurge=1, maxUnavailable=0` | Zero-downtime. Slower rollout but no dropped requests. |
+| Topology spread + pod anti-affinity (preferred) | Zone and node failure resilience. "Preferred" so scheduling works in degraded clusters. |
+| NetworkPolicy deny-all + explicit allowlist | Zero-trust: only Istio on 8080, Prometheus on 9090, Redis on 6379, DNS on 53. |
+| HPA scale-down stabilization 300s | Prevents flapping on bursty trading traffic. Scale-up is fast (30s). |
 
 ### Infrastructure as Code
 
-| Decision | Rationale |
-|----------|-----------|
-| Module composition (vpc/eks/redis/monitoring) | Independent review, selective apply during incidents, clear ownership boundaries for multi-team. |
-| S3 + DynamoDB backend | Prevents concurrent applies. State encrypted at rest, versioned for rollback. |
-| Separate state per environment | Staging `terraform apply` cannot corrupt production state. |
-| `prevent_destroy` on VPC/subnets | Blocks accidental deletion of irreplaceable infrastructure. A `terraform destroy` on VPC requires explicit lifecycle removal. |
-| Separate system/trading node groups | Isolates cluster system components (CoreDNS, kube-proxy) from trading workload pressure. Taints on system nodes prevent scheduling app pods there. |
+| Decision | Why |
+|----------|-----|
+| Module composition (vpc/eks/redis/monitoring) | Independent review, selective apply during incidents, clear ownership for multi-team. |
+| S3 + DynamoDB backend with encryption | Prevents concurrent applies. Versioned for state rollback. |
+| `prevent_destroy` on VPC/subnets | Blocks accidental deletion of irreplaceable infrastructure. |
+| Separate system/trading node groups | Isolates cluster components (CoreDNS) from trading workload pressure. |
+| Static security scanning (tfsec + checkov) | Catches misconfigurations before `terraform apply` — shift-left for infrastructure. |
 
-### What I Would Improve for Real Production Traffic
+### What I Would Improve for Real Production
 
-1. **Write-ahead log**: Persist every order event to a durable log (Kafka or Redis Streams) before acknowledging the client. Enables crash recovery and audit replay.
-2. **Distributed rate limiting**: Current per-pod rate limiter is bypassed by N replicas. Use Istio EnvoyFilter or Redis-backed rate limiter.
-3. **Binary protocol**: Replace JSON/HTTP with gRPC or FIX for lower serialization overhead and stricter contracts.
-4. **Order book data structure**: Replace sorted slices with a skiplist or red-black tree for O(log n) insertion instead of O(n log n) re-sort.
-5. **Canary deployments**: Implement Istio traffic splitting (VirtualService weight) for progressive rollout instead of rolling update.
-6. **External Secrets Operator**: Replace manually-created Kubernetes Secrets with automatic sync from AWS Secrets Manager.
+1. **Write-ahead log** — persist order events to a durable log before acknowledging the client.
+2. **Distributed rate limiting** — Istio EnvoyFilter or Redis-backed, replacing per-pod in-memory limiter.
+3. **Binary protocol** — gRPC or FIX instead of JSON/HTTP for lower serialization overhead.
+4. **Skiplist/red-black tree** — replace sorted slices for O(log n) insertion instead of O(n log n).
+5. **Canary deploys** — Istio VirtualService traffic splitting for progressive rollout.
+6. **External Secrets Operator** — sync from AWS Secrets Manager instead of manual `kubectl create secret`.
 
 ## Project Structure
 
 ```
 .
 +-- application/
-|   +-- cmd/orderbook/main.go          # Entrypoint: config, servers, graceful shutdown
+|   +-- cmd/orderbook/main.go             # Entrypoint, config, graceful shutdown
 |   +-- internal/
-|   |   +-- handler/                    # HTTP handlers (PlaceOrder, CancelOrder, GetOrderBook, GetRecentTrades)
-|   |   +-- orderbook/                  # Matching engine (price-time priority, thread-safe)
-|   |   +-- persistence/                # Redis store (event journal, order snapshots, recovery)
-|   |   +-- health/                     # Liveness and readiness probes
-|   |   +-- middleware/                 # RequestID, logging, metrics, rate limiting, recovery
-|   |   +-- telemetry/                  # OpenTelemetry tracing initialization
-|   +-- tests/                          # Integration tests (testapp helper with miniredis)
+|   |   +-- handler/                      # HTTP handlers
+|   |   +-- orderbook/                    # Matching engine + tests + benchmarks
+|   |   +-- persistence/                  # Redis journal + recovery
+|   |   +-- health/                       # Liveness + readiness probes
+|   |   +-- middleware/                   # RequestID, logging, metrics, rate limit, recovery
+|   |   +-- telemetry/                    # OpenTelemetry tracing
+|   +-- tests/                            # Integration tests (miniredis)
 +-- infrastructure/
 |   +-- deploy/kubernetes/
-|   |   +-- base/                       # Production manifests (Deployment, Service, HPA, PDB, NetworkPolicy, Istio, ServiceMonitor)
-|   |   +-- overlays/local/             # KinD overrides (1 replica, NodePort, local Redis)
-|   |   +-- overlays/production/        # Production kustomization
-|   |   +-- monitoring/local/           # Prometheus, Grafana, Redis exporter for KinD
+|   |   +-- base/                         # Deployment, Service, HPA, PDB, NetworkPolicy, Istio
+|   |   +-- overlays/{local,production}/  # Environment-specific patches
+|   |   +-- monitoring/local/             # Prometheus, Grafana, Redis exporter, dashboards
 |   +-- terraform/
-|   |   +-- environments/local/         # KinD cluster + Istio + Redis + bootstrap
-|   |   +-- environments/production/    # VPC + EKS + ElastiCache + monitoring modules
-|   |   +-- modules/                    # vpc, eks, redis, monitoring
-|   +-- docker/                         # Prometheus, Grafana, Tempo, OTEL Collector configs
-|   +-- scripts/validate.sh             # Correctness + load validation script
+|   |   +-- environments/{local,production}/ # KinD (local), VPC+EKS+ElastiCache (prod)
+|   |   +-- modules/{vpc,eks,redis,monitoring}/
+|   +-- scripts/validate.sh              # E2E correctness + load validation
++-- .github/workflows/
+|   +-- ci-application.yml               # Lint, test, security, build, rollout
+|   +-- ci-infrastructure.yml            # Security scan, plan, apply
+|   +-- actions/
+|       +-- lint/                        # Go linting + SAST
+|       +-- build/                       # Docker build + sign + SBOM
+|       +-- security/                    # Container vulnerability scan
+|       +-- infra-security/              # tfsec + checkov + conftest
+|       +-- deploy/                      # Terraform plan/apply (AWS OIDC)
+|       +-- rollout/                     # K8s safe deploy + health checks + rollback
 +-- docs/
-|   +-- observability.md                # SLOs, metrics, alerting, incident walkthrough
-|   +-- hybrid-migration.md             # On-prem to cloud migration design note
-|   +-- security-review.md              # Threat model, 5 risks, hardening priorities
-+-- .github/workflows/                  # CI pipeline (lint, test, security, build)
-+-- Dockerfile                          # Multi-stage distroless build
-+-- docker-compose.yml                  # Full local stack
-+-- Makefile                            # One-command workflows
+|   +-- cicd.md                          # CI/CD pipeline, deploy safety, rollback, secrets flow
+|   +-- observability.md                 # SLOs, alerting, incident walkthrough
+|   +-- hybrid-migration.md             # On-prem to cloud migration
+|   +-- security-review.md              # Threat model, 5 risks, hardening roadmap
++-- Dockerfile                           # Multi-stage distroless build
++-- docker-compose.yml                   # Full local stack
++-- Makefile                             # One-command workflows
 ```
 
 ## Documentation
 
-| Document | Assessment Section | Description |
-|----------|-------------------|-------------|
-| [Observability and Reliability](docs/observability.md) | Section 5 | SLO definitions, metrics philosophy, alerting strategy, incident debugging walkthrough |
-| [Hybrid Migration](docs/hybrid-migration.md) | Section 6 | Phased on-prem to cloud migration design note |
-| [Security Self-Review](docs/security-review.md) | Section 7 | Five critical risks, threat model, hardening roadmap |
+| Document | Section | What It Covers |
+|----------|---------|---------------|
+| [CI/CD and Production Safety](docs/cicd.md) | 4 | Pipeline architecture, security gates, deploy safety, rollback, branching model, secrets flow |
+| [Observability](docs/observability.md) | 5 | SLO definitions, four golden signals, alerting philosophy, incident debugging walkthrough |
+| [Hybrid Migration](docs/hybrid-migration.md) | 6 | Phased on-prem to cloud migration with shadow traffic and canary cutover |
+| [Security Review](docs/security-review.md) | 7 | Threat model (STRIDE + actors + assets), five risks, compliance gaps, 30-day hardening roadmap |

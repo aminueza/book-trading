@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 280" font-family="system-ui, -apple-system, sans-serif" font-size="12">
+  <defs>
+    <filter id="s" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="1" stdDeviation="2" flood-opacity="0.08"/>
+    </filter>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a0aec0"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c53030"/>
+    </marker>
+  </defs>
+
+  <rect width="750" height="280" fill="#f8f9fa" rx="8"/>
+
+  <!-- Zone labels -->
+  <rect x="15" y="35" width="130" height="210" rx="6" fill="#fee2e2" opacity="0.5"/>
+  <text x="80" y="55" text-anchor="middle" fill="#c53030" font-size="10" font-weight="600" letter-spacing="1">UNTRUSTED</text>
+
+  <rect x="155" y="35" width="580" height="210" rx="6" fill="#ebf8ff" opacity="0.4"/>
+  <text x="445" y="55" text-anchor="middle" fill="#4a7fb5" font-size="10" font-weight="600" letter-spacing="1">TRUST BOUNDARY (Kubernetes cluster)</text>
+
+  <!-- Trust boundary line -->
+  <line x1="150" y1="35" x2="150" y2="245" stroke="#c53030" stroke-width="2" stroke-dasharray="6,4"/>
+
+  <!-- Client -->
+  <rect x="25" y="100" width="110" height="40" rx="6" fill="#c53030" filter="url(#s)"/>
+  <text x="80" y="120" text-anchor="middle" fill="white" font-weight="600">Client</text>
+  <text x="80" y="134" text-anchor="middle" fill="#fed7d7" font-size="9">HTTP</text>
+
+  <!-- Arrow: client → Istio -->
+  <line x1="137" y1="120" x2="175" y2="120" stroke="#c53030" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- Istio GW -->
+  <rect x="180" y="100" width="120" height="40" rx="6" fill="#2d3748" filter="url(#s)"/>
+  <text x="240" y="120" text-anchor="middle" fill="white" font-weight="600">Istio Gateway</text>
+  <text x="240" y="134" text-anchor="middle" fill="#a0aec0" font-size="9">mTLS termination</text>
+
+  <!-- Arrow: Istio → orderbook -->
+  <line x1="302" y1="120" x2="340" y2="120" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="320" y="112" fill="#718096" font-size="8">TB 1</text>
+
+  <!-- Orderbook pod -->
+  <rect x="345" y="90" width="140" height="60" rx="6" fill="#4a7fb5" filter="url(#s)"/>
+  <text x="415" y="115" text-anchor="middle" fill="white" font-weight="600">orderbook pod</text>
+  <text x="415" y="132" text-anchor="middle" fill="#d4e4f7" font-size="9">nonroot | ro-fs | no caps</text>
+  <text x="415" y="144" text-anchor="middle" fill="#d4e4f7" font-size="9">seccomp RuntimeDefault</text>
+
+  <!-- Arrow: orderbook → Redis -->
+  <line x1="487" y1="120" x2="525" y2="120" stroke="#a0aec0" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="505" y="112" fill="#718096" font-size="8">TB 2</text>
+
+  <!-- Redis -->
+  <rect x="530" y="100" width="100" height="40" rx="6" fill="#c53030" filter="url(#s)"/>
+  <text x="580" y="120" text-anchor="middle" fill="white" font-weight="600">Redis</text>
+  <text x="580" y="134" text-anchor="middle" fill="#fed7d7" font-size="9">:6379</text>
+
+  <!-- Prometheus -->
+  <rect x="345" y="180" width="100" height="36" rx="6" fill="#edf2f7" stroke="#a0aec0" stroke-width="1"/>
+  <text x="395" y="203" text-anchor="middle" fill="#2d3748" font-weight="600" font-size="11">Prometheus</text>
+
+  <!-- OTEL -->
+  <rect x="460" y="180" width="100" height="36" rx="6" fill="#edf2f7" stroke="#a0aec0" stroke-width="1"/>
+  <text x="510" y="203" text-anchor="middle" fill="#2d3748" font-weight="600" font-size="11">OTEL Collector</text>
+
+  <!-- Arrows from pod to observability -->
+  <line x1="400" y1="150" x2="395" y2="178" stroke="#a0aec0" stroke-width="1" marker-end="url(#a)"/>
+  <line x1="430" y1="150" x2="510" y2="178" stroke="#a0aec0" stroke-width="1" marker-end="url(#a)"/>
+  <text x="370" y="168" fill="#718096" font-size="8">:9090</text>
+  <text x="470" y="162" fill="#718096" font-size="8">traces</text>
+
+  <!-- CI runner (TB 3) -->
+  <rect x="620" y="180" width="110" height="36" rx="6" fill="#dd6b20" filter="url(#s)"/>
+  <text x="675" y="203" text-anchor="middle" fill="white" font-weight="600" font-size="11">CI runner</text>
+
+  <line x1="675" y1="180" x2="675" y2="152" stroke="#dd6b20" stroke-width="1" marker-end="url(#a)"/>
+  <text x="688" y="168" fill="#dd6b20" font-size="8">TB 3</text>
+  <text x="688" y="178" fill="#dd6b20" font-size="8">OIDC</text>
+
+  <!-- NetworkPolicy label -->
+  <rect x="180" y="230" width="360" height="22" rx="4" fill="#edf2f7"/>
+  <text x="360" y="245" text-anchor="middle" fill="#718096" font-size="10">NetworkPolicy: ingress allow Istio:8080, Prometheus:9090 | egress allow Redis:6379, DNS:53</text>
+
+  <!-- Legend -->
+  <text x="25" y="270" fill="#c53030" font-size="10" font-weight="600">TB = Trust Boundary</text>
+  <line x1="165" y1="266" x2="195" y2="266" stroke="#c53030" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="200" y="270" fill="#718096" font-size="10">external boundary</text>
+</svg>
