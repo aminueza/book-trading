@@ -29,11 +29,22 @@ resource "aws_security_group" "redis" {
     cidr_blocks = var.allowed_cidr_blocks
   }
 
+  # Redis does not initiate outbound connections. Egress limited to DNS
+  # for ElastiCache internal operations (health checks, replication discovery).
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    description = "DNS resolution"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = var.allowed_cidr_blocks
+  }
+
+  egress {
+    description = "DNS resolution (TCP)"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
   }
 
   tags = merge(var.tags, {

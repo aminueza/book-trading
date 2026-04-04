@@ -38,7 +38,8 @@ resource "aws_subnet" "public" {
   cidr_block        = var.public_subnet_cidrs[count.index]
   availability_zone = var.availability_zones[count.index]
 
-  # Public subnets get public IPs for ALB/NLB.
+  # tfsec:ignore:aws-ec2-no-public-ip-subnet -- Public subnets host ALB/NLB which require public IPs.
+  # No application workloads run here; EKS nodes are in private subnets.
   map_public_ip_on_launch = true
 
   tags = merge(var.tags, {
@@ -180,14 +181,12 @@ resource "aws_iam_role_policy" "flow_logs" {
     Version = "2012-10-17"
     Statement = [{
       Action = [
-        "logs:CreateLogGroup",
         "logs:CreateLogStream",
         "logs:PutLogEvents",
-        "logs:DescribeLogGroups",
         "logs:DescribeLogStreams"
       ]
       Effect   = "Allow"
-      Resource = "*"
+      Resource = "${aws_cloudwatch_log_group.flow_logs.arn}:*"
     }]
   })
 }
