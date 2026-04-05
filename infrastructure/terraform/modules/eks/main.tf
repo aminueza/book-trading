@@ -55,15 +55,14 @@ resource "aws_security_group" "cluster" {
   description = "Security group for EKS cluster ${var.cluster_name}"
   vpc_id      = var.vpc_id
 
-  # tfsec:ignore:aws-ec2-no-public-egress-sgr -- EKS control plane requires outbound HTTPS
-  # to AWS APIs (ECR, STS, CloudWatch, EKS service endpoints) which resolve to varying IPs.
-  # VPC endpoints would eliminate this but add complexity and cost; acceptable for this scope.
+  # EKS control plane requires outbound HTTPS to AWS APIs (ECR, STS, CloudWatch, EKS endpoints)
+  # which resolve to varying IPs. VPC endpoints would eliminate this but add cost; acceptable for this scope.
   egress {
     description = "EKS control plane outbound to AWS APIs"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["0.0.0.0/0"] #tfsec:ignore:aws-ec2-no-public-egress-sgr
   }
 
   tags = merge(var.tags, {
