@@ -23,7 +23,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 LABEL maintainer="reliability-engineering"
 LABEL org.opencontainers.image.source="internal"
-LABEL org.opencontainers.image.description="Book trading API"
+LABEL org.opencontainers.image.description="OrderBook API"
 
 COPY --from=builder /book-trading /book-trading
 
