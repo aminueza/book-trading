@@ -1,103 +1,91 @@
-# Observability and Reliability
+# Observability
 
-How the order book service is monitored and how to debug it when things go wrong.
-
----
+How monitoring works and how to debug things when they break.
 
 ## SLOs
 
-Two SLOs, both chosen because they reflect what users actually experience:
+Two SLOs based on what users actually feel:
 
-**Availability: 99.9% over 30 days.** Measured as non-5xx responses on `/api/v1/*` at the Istio gateway. A 5xx on order placement means a trade was lost — that's the user impact we're tracking, not node CPU or pod restart count.
+**Availability: 99.9% over 30 days.** Non-5xx on `/api/v1/*` measured at Istio 
+gateway. That's about 43 minutes of budget per month. At 50% burned we freeze 
+deploys, at 80% we page.
 
-```promql
-1 - (
-  sum(rate(http_requests_total{path=~"/api/v1/.*", status=~"5.."}[30d]))
-  /
-  sum(rate(http_requests_total{path=~"/api/v1/.*"}[30d]))
-)
-```
+**Order placement latency: p99 under 100ms.** Measured locally at 169ms p99 
+under load (10 concurrency, KinD) — we're already over. The bottleneck is 
+synchronous Redis writes in the request path. Realistic target after moving 
+journal writes async is p99 < 50ms, but until that's done, 100ms is the honest 
+number.
 
-Budget: ~43 minutes/month. At 50% consumed, freeze non-critical deploys. At 80%, page on-call and halt all changes.
+## What we actually measure
 
-**Order placement latency: p99 < 50ms.** Matching is in-memory and takes microseconds. The 50ms budget covers the full request path: Istio sidecar, JSON parsing, matching, Redis cache invalidation, response serialization. If p99 exceeds this, something is degraded.
+Three metrics from the middleware, that's it:
 
-```promql
-histogram_quantile(0.99,
-  sum(rate(http_request_duration_seconds_bucket{method="POST", path="/api/v1/orders"}[5m])) by (le)
-)
-```
+- `http_requests_total` (counter) — method, path, status
+- `http_request_duration_seconds` (histogram) — method, path
+- `http_requests_in_flight` (gauge)
 
-## Metrics
+Histogram buckets are dense in 1-50ms (0.001, 0.005, 0.01, 0.025, 0.05) 
+because for an order book, going from 5ms to 25ms matters. Standard Prometheus 
+defaults would miss that shift entirely.
 
-Three application metrics from `application/internal/middleware/middleware.go`:
+**Known gap:** There are no Redis client metrics. We can't see Redis RTT, 
+connection pool usage, or command latency from the app. The redis-exporter 
+gives server-side stats but not per-call latency from the application's 
+perspective. This is the first thing to add.
 
-| Metric | Type | Labels |
-|--------|------|--------|
-| `http_requests_total` | Counter | method, path, status |
-| `http_request_duration_seconds` | Histogram | method, path |
-| `http_requests_in_flight` | Gauge | — |
+**Known gap:** OpenTelemetry is wired up but only gives one span per HTTP 
+request (auto-instrumented via otelmux). There are no custom spans on the 
+matching engine, Redis calls, or cache operations. During an incident you 
+get request-level duration but can't break it down further without adding 
+instrumentation.
 
-These cover three of the four golden signals (traffic, latency, saturation). Errors are derived from `http_requests_total` by filtering on `status=~"5.."`.
-
-The histogram buckets are intentionally dense in the 1-50ms range (`0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0`) because that's where meaningful shifts happen in a trading system. A jump from 5ms to 25ms p99 matters; the coarse 0.25-1.0s buckets are just there to catch outliers.
-
-Go runtime metrics (`go_goroutines`, `go_gc_duration_seconds`, `go_memstats_alloc_bytes`) are exposed for free via `promhttp.Handler()` and shown in the Grafana "Go Runtime" row.
+Go runtime metrics (goroutines, GC, memory) come free from promhttp.
 
 ## Logs
 
-Every request produces a structured JSON log line via zerolog:
+Structured JSON via zerolog on every request — level, request_id, method, 
+path, status, duration, remote_addr. The request_id shows up in the 
+X-Request-ID header so you can grep logs by the same ID the client sees.
 
-```json
-{
-  "level": "info",
-  "request_id": "a1b2c3d4-...",
-  "method": "POST",
-  "path": "/api/v1/orders",
-  "status": 201,
-  "duration": "2.134ms",
-  "remote_addr": "10.244.0.1:54321",
-  "time": "2025-01-15T14:30:00.123456789Z",
-  "message": "request completed"
-}
-```
-
-The `request_id` ties everything together: the client sees it in `X-Request-ID`, logs contain it, traces are tagged with it. Three-way correlation without any extra effort during an incident.
-
-Debug logging is off by default (`LOG_LEVEL=info`). Change the ConfigMap and restart to enable it — no redeploy needed.
+Debug logging is off by default. Flip LOG_LEVEL in the ConfigMap and 
+restart.
 
 ## Alerting
 
-The goal is to alert on user impact, not infrastructure noise.
+Pages (PagerDuty): SLO fast burn (14.4x error rate over 1h), total 
+unavailability (2 min), extreme latency (p99 > 500ms for 5 min).
 
-**Pages (PagerDuty):** SLO fast burn (14.4x rate over 1h — budget exhausted in ~2 days if unchecked), complete unavailability (zero successful responses for 2 min), or extreme latency (p99 > 500ms for 5 min).
+Tickets (Slack): slow burn (1x over 3d), HPA maxed out, multiple pods 
+failing readiness.
 
-**Tickets (Slack + Jira):** SLO slow burn (1x rate over 3d — gradual degradation), HPA at max replicas and still saturated, or multiple pods failing readiness simultaneously.
+Doesn't alert: individual restarts, CPU over 70%, single 5xx, node metrics. 
+Kubernetes and HPA handle those. If they cause user impact, the SLO alert 
+fires anyway.
 
-**Does not alert:** Individual pod restarts (Kubernetes handles it), CPU above 70% (that's what the HPA is for), single 5xx errors (transient), node-level metrics (infrastructure team's concern — the application SLO captures user impact regardless of cause).
+## Debugging a latency spike
 
-The alerting rules are implemented as a `PrometheusRule` CRD in `infrastructure/deploy/kubernetes/base/prometheusrule.yaml`.
+If latency goes up but CPU/memory look normal and users see intermittent 
+failures:
 
-## Incident Walkthrough
+Start with `http_request_duration_seconds` in Grafana. Which endpoints? 
+If only POST /orders is slow, it's the write path. If everything is slow, 
+it's lower — network or sidecar. Check if it lines up with a deploy.
 
-**Scenario from the assessment:** latency increases, CPU and memory look normal, some users report intermittent failures.
+Check `http_requests_in_flight`. If it's spiking with normal request rate, 
+something is holding connections. If it's normal, individual requests are 
+just slow.
 
-Here's how I'd work through it.
+Check Redis via the exporter dashboard. We don't have app-side Redis 
+metrics yet (see gap above), so we're limited to server-side stats — 
+connected clients, memory usage, slowlog. If connected clients are near 
+the pool size (50), requests are queuing.
 
-**First thing:** open Grafana, look at `http_request_duration_seconds`. Which endpoints are slow? If it's only `POST /orders` but `GET /orderbook/{pair}` is fine, the problem is in the write path — matching or Redis persistence. If everything is slow, it's lower in the stack (network, sidecar, node). When did the spike start? Overlay deploy events on the graph. If it correlates with a rollout, that's the first hypothesis.
+Check CFS throttling: `container_cpu_cfs_throttled_periods_total`. CPU 
+can look fine at 250m average but if it bursts past the 500m limit, the 
+kernel throttles and you get latency spikes. We set request=limit to 
+avoid this but worth verifying nothing changed.
 
-**Check concurrency.** Is `http_requests_in_flight` spiking? If it's 10x normal with normal request rate, something is holding connections open. If in-flight is normal but latency is high, each individual request is slow.
+Without custom trace spans we can't break down where inside a request the 
+time goes. That's a gap for now, correlate log duration with Redis 
+exporter timing to narrow it down.
 
-**Check Redis.** Order placement does a cache `DEL` and a journal `LPUSH`. If Redis is slow, every write pays. Look at `redis_commands_duration_seconds_total` from the exporter. Also check `redis_connected_clients` against the pool size (50) — if they're converging, requests are queueing for connections.
-
-**Check for CFS throttling.** CPU can look "normal" at 250m but if the pod hits the 500m limit in bursts, the kernel throttles it. This shows up as latency spikes that don't correlate with average CPU. Check `container_cpu_cfs_throttled_periods_total` — if it's climbing, that's the cause. (Our base deployment sets request=limit specifically to avoid this, but it's worth verifying in case an overlay changed it.)
-
-**Trace a slow request.** Filter Tempo by `duration > 100ms`. The trace breaks down into spans: handler, `engine.PlaceOrder`, `engine.match`, `store.RecordPlace`, `cache.Del`. Whichever span is fat is where the problem is.
-
-If `store.RecordPlace` is 80ms — Redis is the bottleneck, probably `maxmemory` hit causing eviction churn during writes. If `engine.match` is 80ms — the book is too deep and `sort.Slice` (O(n log n)) is expensive. Check book depth. If latency is high on one pair but not others — per-book mutex contention, all orders for that pair serialize through one lock.
-
-**After fixing it:** verify p99 drops below 50ms. Calculate error budget consumed. If it was more than 10%, write a brief incident review. Add monitoring for whatever was missing — if Redis pool exhaustion was the cause, add an alert on `redis_connected_clients > pool_size * 0.8`.
-
-## Multi-Region
-
-If this went multi-region: move SLI measurement to the edge (Route 53 health checks, not in-cluster Prometheus). Add a replication lag SLI between regions. Give each region its own error budget — a single-region outage shouldn't mask healthy regions in the aggregate.

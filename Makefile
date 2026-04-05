@@ -2,7 +2,7 @@
 #
 # Quick start (matches infrastructure/terraform/environments/local):
 #   make up        → docker build + TF apply + kubectl apply -k (overlay + monitoring)
-#   make pf        → port-forward Istio ingress (keep running) → :8080
+#   make port-forward        → port-forward Istio ingress (keep running) → :8080
 #   make validate     → validate.sh against http://127.0.0.1:8001 (direct NodePort)
 #   make redis-cli    → Redis CLI in-cluster (trading/redis-master)
 #   make down         → terraform destroy + kind delete
@@ -17,10 +17,10 @@
 # IaC: Homebrew deprecated the core `terraform` formula (BUSL). This Makefile uses
 # `tofu` when available (brew install opentofu), else `terraform` if on PATH.
 
-.PHONY: up down validate validate-istio test build lint clean status logs pf restart loadtest chaos-node-failure chaos-drain _check-deps _check-go install-deps deps deps-info link-kubectl redis-cli redis-forward
+.PHONY: up down validate validate-istio test build lint clean status logs port-forward restart load-test chaos-node-failure chaos-drain _check-deps _check-go install-deps deps deps-info link-kubectl redis-cli redis-forward
 
 CLUSTER_NAME ?= orderbook-local
-# KinD local API: NodePort on host :8001 (Terraform extraPortMappings). Use LOADTEST_BASE=http://localhost:8080 with `make pf` for Istio.
+# KinD local API: NodePort on host :8001 (Terraform extraPortMappings). Use LOADTEST_BASE=http://localhost:8080 with `make port-forward` for Istio.
 LOADTEST_BASE ?= http://127.0.0.1:8001
 # Host CPU → linux Go arch (KinD nodes usually match Docker host; avoids amd64 image on arm64 clusters).
 TARGETARCH ?= $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/' -e 's/arm64/arm64/')
@@ -77,7 +77,7 @@ up: _check-deps build
 	@echo ""
 	@echo "URLs:  API (NodePort)  http://127.0.0.1:8001"
 	@echo "       Grafana         http://127.0.0.1:3000"
-	@echo "Optional: make pf  →  http://localhost:8080 via Istio, then make validate-istio"
+	@echo "Optional: make port-forward  →  http://localhost:8080 via Istio, then make validate-istio"
 
 ## Tear down Terraform-managed KinD cluster
 down:
@@ -92,7 +92,7 @@ validate:
 	@echo "Running validation against http://127.0.0.1:8001..."
 	@./infrastructure/scripts/validate.sh http://127.0.0.1:8001
 
-## Use after: make pf  (Istio ingress on localhost:8080)
+## Use after: make port-forward  (Istio ingress on localhost:8080)
 validate-istio:
 	@echo "Running validation against http://localhost:8080 (Istio)..."
 	@./infrastructure/scripts/validate.sh http://localhost:8080
@@ -126,8 +126,8 @@ status:
 	@echo "=== trading ==="
 	@$(KUBECTL) get deployments,services -n trading 2>/dev/null || true
 
-## Port-forward Istio ingress (NetworkPolicy allows mesh edge, not ad-hoc pod tunnels)
-pf:
+## Port-forward Istio ingress to localhost:8080 (used by validate-istio and load-test)
+port-forward:
 	@echo "Forwarding localhost:8080 -> istio-ingressgateway:80 ($(KUBECONFIG_FILE))"
 	$(KUBECTL) port-forward -n istio-system svc/istio-ingressgateway 8080:80
 
@@ -143,7 +143,7 @@ restart:
 # Load testing (hey: installed via make install-deps / brew install hey)
 # ============================================================
 
-loadtest:
+load-test:
 	@set -e; \
 	PATH="/opt/homebrew/bin:/usr/local/bin:$$PATH"; \
 	command -v hey >/dev/null 2>&1 || { \
@@ -151,7 +151,7 @@ loadtest:
 	  exit 1; \
 	}; \
 	echo "Sending 1000 POSTs (50 concurrent) → $(LOADTEST_BASE)/api/v1/orders"; \
-	echo "  (default: KinD NodePort :8001; Istio: make pf in another terminal, then LOADTEST_BASE=http://127.0.0.1:8080 make loadtest)"; \
+	echo "  (default: KinD NodePort :8001; Istio: make port-forward in another terminal, then LOADTEST_BASE=http://127.0.0.1:8080 make load-test)"; \
 	hey -n 1000 -c 50 -m POST \
 		-H "Content-Type: application/json" \
 		-d '{"pair":"BTC-USD","side":"buy","price":50000,"quantity":0.1}' \
@@ -206,7 +206,7 @@ deps-info:
 	@echo "Go (for \`make test\` / \`make lint\`):"
 	@echo "  https://go.dev/dl/   or   macOS: brew install go"
 	@echo ""
-	@echo "  hey (HTTP load gen for \`make loadtest\`)"
+	@echo "  hey (HTTP load gen for \`make load-test\`)"
 	@echo "    macOS: brew install hey   (included in \`make install-deps\`)"
 	@echo "    Other: go install github.com/rakyll/hey@latest  (add GOPATH/bin to PATH)"
 	@echo ""

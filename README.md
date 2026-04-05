@@ -29,16 +29,6 @@ A low-latency limit order book with price-time priority matching, built in Go. C
 
 ### Prerequisites
 
-Docker (running), kind, kubectl, helm, opentofu (or terraform). On macOS:
-
-```bash
-make install-deps   # Installs kind, kubectl, helm, opentofu, hey via Homebrew
-```
-
-Other systems: `make deps-info` for manual install links. Go 1.24+ needed only for `make test` / `make lint`.
-
-### From Scratch
-
 ```bash
 git clone <repo> && cd book-trading
 make install-deps   # macOS only
@@ -52,14 +42,14 @@ make validate       # Correctness tests + load test
 |----------|-----|
 | API (NodePort) | http://127.0.0.1:8001 |
 | Grafana | http://127.0.0.1:3000 (admin/admin) |
-| API via Istio | `make pf` in another terminal, then http://localhost:8080 |
+| API via Istio | `make port-forward` in another terminal, then http://localhost:8080 |
 
 ### Validate
 
 ```bash
 make test           # Unit tests with race detector + coverage (requires Go 1.24+)
 make validate       # E2E: health, ordering, matching, cancellation, input validation, load
-make validate-istio # Same via Istio (run make pf first)
+make validate-istio # Same via Istio (run make port-forward first)
 ```
 
 ### Load Test
@@ -67,8 +57,8 @@ make validate-istio # Same via Istio (run make pf first)
 Requires `hey` (installed by `make install-deps`):
 
 ```bash
-make pf             # Terminal 1: port-forward Istio ingress
-make loadtest       # Terminal 2: 1000 POSTs, 50 concurrent
+make port-forward             # Terminal 1: port-forward Istio ingress
+make load-test       # Terminal 2: 1000 POSTs, 50 concurrent
 ```
 
 Results visible in Grafana at http://127.0.0.1:3000.
@@ -78,14 +68,6 @@ Results visible in Grafana at http://127.0.0.1:3000.
 ```bash
 make down
 ```
-
-### Docker Compose (alternative, no Kubernetes)
-
-```bash
-docker compose up --build
-```
-
-API at http://localhost:8080, Grafana at http://localhost:3000.
 
 ## Production Design (Not Deployed)
 

@@ -156,6 +156,10 @@ func main() {
 
 	appRouter.HandleFunc("/healthz", healthChecker.Liveness).Methods("GET")
 	appRouter.HandleFunc("/readyz", healthChecker.Readiness).Methods("GET")
+	appRouter.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"service":"orderbook","version":"` + version + `","endpoints":["/api/v1/orders","/api/v1/orderbook/{pair}","/api/v1/trades/{pair}","/healthz","/readyz"]}`))
+	}).Methods("GET")
 
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())

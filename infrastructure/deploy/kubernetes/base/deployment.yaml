@@ -19,6 +19,7 @@
 #    unpredictable tail latencies. Setting request=limit puts the pod in the
 #    "Guaranteed" QoS class, which gets priority during node pressure and
 #    avoids CFS throttling surprises.
+#    Ref: https://engineering.indeedblog.com/blog/2019/12/cpu-throttling/
 #
 # 5. Security context:
 #    Non-root, read-only filesystem, no privilege escalation, dropped
