@@ -125,8 +125,9 @@ docs/                                 #   Design documents (see below)
 
 | Document | Section | Covers |
 |----------|---------|--------|
-| [Design Decisions](docs/design-decisions.md) | 1-3 | Container, Kubernetes, and IaC tradeoffs; production improvements |
-| [CI/CD and Production Safety](docs/cicd.md) | 4 | Pipeline architecture, security gates, deploy safety, rollback, secrets flow |
-| [Observability](docs/observability.md) | 5 | SLOs, four golden signals, alerting, incident debugging walkthrough |
-| [Hybrid Migration](docs/hybrid-migration.md) | 6 | Phased on-prem to cloud migration with shadow traffic and canary cutover |
-| [Security Review](docs/security-review.md) | 7 | Threat model (STRIDE), five infrastructure risks, compliance, hardening priorities |
+| [CI/CD and Production Safety](docs/cicd.md) | 4 | Security gates, deploy safety, rollback, secrets |
+| [Observability](docs/observability.md) | 5 | SLOs, alerting, incident debugging walkthrough |
+| [Hybrid Migration](docs/hybrid-migration.md) | 6 | Phased on-prem to cloud migration |
+| [Security Review](docs/security-review.md) | 7 | Threat model (STRIDE), five risks, hardening priorities |
+
+Design decisions for Sections 1-3 are documented inline in the Kubernetes manifests, Terraform modules, and Dockerfile comments.
