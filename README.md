@@ -14,7 +14,7 @@ A low-latency limit order book with price-time priority matching, built in Go. C
 
 ## Tools
 
-LLM assistance was used for code scaffolding and documentation drafting. Architecture, design decisions, tradeoffs, and risk prioritization are my own.
+LLM assistance was used for code scaffolding, boilerplate configuration, and documentation drafting. Architecture, design decisions, tradeoffs, and risk prioritization are my own.
 
 ## Architecture
 
