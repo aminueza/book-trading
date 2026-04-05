@@ -105,11 +105,11 @@ docs/                                 #   Design documents (see below)
 
 ## Documentation
 
-| Document | Section | Covers |
-|----------|---------|--------|
-| [CI/CD and Production Safety](docs/cicd.md) | 4 | Security gates, deploy safety, rollback, secrets |
-| [Observability](docs/observability.md) | 5 | SLOs, alerting, incident debugging walkthrough |
-| [Hybrid Migration](docs/hybrid-migration.md) | 6 | Phased on-prem to cloud migration |
-| [Security Review](docs/security-review.md) | 7 | Threat model (STRIDE), five risks, hardening priorities |
+| Document | Covers |
+|----------|--------|
+| [CI/CD and Production Safety](docs/cicd.md) | Security gates, deploy safety, rollback, secrets |
+| [Observability](docs/observability.md) | SLOs, alerting, incident debugging walkthrough |
+| [Hybrid Migration](docs/hybrid-migration.md) | Phased on-prem to cloud migration |
+| [Security Review](docs/security-review.md) | Threat model (STRIDE), five risks, hardening priorities |
 
-Design decisions for Sections 1-3 are documented inline in the Kubernetes manifests, Terraform modules, and Dockerfile comments.
+Design decisions for the application, Kubernetes deployment, and Terraform modules are documented inline in comments.

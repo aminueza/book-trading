@@ -57,10 +57,4 @@ If any of these becomes impractical that's a signal to accelerate the migration,
 
 Roughly 10-12 weeks. Engineering effort concentrates in weeks 3-8 (infra setup and shadow validation). Cutover and decommission are mostly observation. The biggest schedule risk is Direct Connect provisioning that starts it in week 1.
 
----
 
-## References
-
-- Istio traffic mirroring — used for the shadow traffic phase. https://istio.io/latest/docs/tasks/traffic-management/mirroring/
-- AWS Direct Connect vs VPN latency considerations. https://docs.aws.amazon.com/directconnect/latest/UserGuide/Welcome.html
-- Martin Kleppmann, "Designing Data-Intensive Applications" — Ch. 5 on replication and consistency tradeoffs informed the data consistency section.

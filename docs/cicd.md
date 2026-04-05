@@ -4,7 +4,7 @@ Two workflows split by concern. Infrastructure changes (`ci-infrastructure.yml`)
 
 ## Security Gates
 
-Application code goes through gosec (SAST), govulncheck (dependency CVEs), and Trivy (container image CVEs). Every image gets a Cosign signature, SPDX SBOM, and SLSA provenance attestation.
+Application code goes through gosec (SAST), govulncheck (dependency CVEs), and Trivy (container image CVEs). Every image gets an SPDX SBOM and SLSA provenance attestation. Cosign signing is built into the pipeline but the key isn't configured yet, see Risk 4 in the security review.
 
 Infrastructure code goes through tfsec and checkov before `terraform plan`. Both run statically against HCL files with no cloud credentials needed, so problems surface during code review.
 
@@ -20,6 +20,7 @@ If any check fails, `kubectl rollout undo` restores the previous revision and Sl
 
 Production deploys require manual approval via GitHub Environments. A concurrency group ensures only one deploy runs at a time. AWS credentials use OIDC federation, no long-lived keys. `minReadySeconds: 10` catches pods that crash shortly after initial readiness. `revisionHistoryLimit: 5` keeps rollback targets available.
 
+Rolling update over canary because each replica has its own in-memory order book, splitting traffic between two versions would give users inconsistent book state.
 ## Rollback
 
 Automatic on verification failure. Manual:
@@ -36,3 +37,4 @@ Trunk-based. Short-lived feature branches, merge to main. Deploys only trigger o
 ## Secrets
 
 CI never sees the Redis password. It's injected into pods via Kubernetes Secrets. AWS credentials are ephemeral OIDC tokens (~1h TTL). Nothing is logged or written to disk during CI.
+
