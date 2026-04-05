@@ -12,6 +12,10 @@ A low-latency limit order book with price-time priority matching, built in Go. C
 - **No API authentication.** Production would use Istio `RequestAuthentication` with JWT. See [Security Review, Risk 1](docs/security-review.md).
 - **KinD for local, EKS for production.** Only the local KinD environment is runnable. Production Terraform is a design, not deployed.
 
+## Tools
+
+LLM assistance was used for code scaffolding and documentation drafting. Architecture, design decisions, tradeoffs, and risk prioritization are my own.
+
 ## Architecture
 
 ![Architecture: Istio Gateway to 3 orderbook pods to Redis, with Prometheus, Tempo, and Grafana](docs/images/architecture-diagram.svg)
