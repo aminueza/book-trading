@@ -19,3 +19,5 @@ resources:
   - istio-gateway.yaml
   - istio-virtualservice.yaml
   - servicemonitor.yaml
+  # prometheusrule.yaml is not in base because KinD lacks the CRD.
+  # Production overlay includes it directly.

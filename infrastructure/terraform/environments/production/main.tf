@@ -1,4 +1,7 @@
 # Production environment — composed from shared modules.
+# NOTE: This configuration has NOT been applied. It exists to demonstrate
+# infrastructure design, module composition, and production-grade defaults.
+# Only the local KinD environment (environments/local/) is runnable.
 #
 # Design decisions:
 #

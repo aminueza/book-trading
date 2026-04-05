@@ -148,9 +148,40 @@ resource "aws_flow_log" "main" {
   })
 }
 
+resource "aws_kms_key" "flow_logs" {
+  description             = "Encryption key for ${var.environment} VPC flow logs"
+  deletion_window_in_days = 14
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowAccountRoot"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowCloudWatchLogs"
+        Effect    = "Allow"
+        Principal = { Service = "logs.amazonaws.com" }
+        Action    = ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey*", "kms:DescribeKey"]
+        Resource  = "*"
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "${var.environment}-flow-logs-kms" })
+}
+
+data "aws_caller_identity" "current" {}
+
 resource "aws_cloudwatch_log_group" "flow_logs" {
   name              = "/vpc/flow-logs/${var.environment}"
   retention_in_days = 30
+  kms_key_id        = aws_kms_key.flow_logs.arn
 
   tags = var.tags
 }

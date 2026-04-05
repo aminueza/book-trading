@@ -1,126 +1,59 @@
 # Hybrid Migration: On-Prem to Cloud
 
-A phased approach to migrating the order book service from an on-premises data center to AWS while maintaining availability throughout.
+This describes how I'd move the order book service from on-prem to AWS without taking it down.
 
 ---
 
-## Constraints
+## Why This Is Hard
 
-| Constraint | Implication |
-|-----------|-------------|
-| Zero downtime | No maintenance window during trading hours. Every phase must be reversible. |
-| Latency budget | App → Redis round trip must stay under 2ms. Cross-datacenter calls violate this. |
-| Data consistency | Only one environment actively matches orders at a time. Dual-active = split-brain with duplicate fills. |
-| Rollback at every stage | The previous environment stays running until the next phase is proven. |
+The matching engine needs sub-2ms round trips to Redis. That rules out running the app in one datacenter and Redis in another. And you can't run two matching engines simultaneously — orders would get filled twice, which in a trading context is catastrophic, not just a bug.
 
----
+So the migration has to be sequential: build cloud, validate cloud, move traffic, tear down on-prem. No shortcuts.
 
-## Phases
+## The Approach
 
-### Phase 0: Assessment (Week 1-2)
+**Start with baselines.** Before moving anything, instrument the on-prem deployment with the same Prometheus metrics already in this repo. Measure p99 latency, throughput, error rate, Redis round-trip. These numbers are the acceptance criteria for every phase — if cloud can't match them within 10%, we don't proceed. Also map every dependency: DNS, NTP, CAs, monitoring endpoints. Missing one of these has stalled migrations I've seen before.
 
-Establish what "normal" looks like before moving anything.
+Pick a network path early. Direct Connect takes weeks to provision but adds only 1-2ms. VPN is faster to set up but adds 5-20ms, which may be fine for the validation phase but not for production traffic.
 
-**Actions:**
-- Instrument the on-prem service with the same Prometheus metrics and structured logging used in this repository. The application code is environment-agnostic.
-- Measure baseline: p50/p95/p99 latency, throughput (orders/sec), error rate, Redis round-trip. These become acceptance criteria for every subsequent phase.
-- Map dependencies: DNS, NTP, certificate authorities, monitoring endpoints. Each needs a cloud equivalent.
-- Choose network path: site-to-site VPN (~5-20ms added) or Direct Connect (~1-2ms, weeks to provision).
+**Build the cloud side, send it nothing.** Apply the production Terraform — VPC, EKS, ElastiCache, monitoring. Deploy the orderbook to EKS, verify health checks pass, verify it can reach ElastiCache. Deploy Prometheus and Grafana so both environments have independent monitoring. If anything goes wrong here, delete it and start over. This is the cheapest phase to fail.
 
-**Exit criteria:** Baselines documented, network path provisioned.
+**Shadow traffic.** Configure Istio traffic mirroring on the on-prem side. Every request gets copied to AWS, but the cloud responses are discarded — users only see on-prem. Compare latency, error rates, and response correctness between environments. This catches the things you don't expect: DNS resolves differently in the VPC, NTP drift means timestamps don't match, the Redis pool needs different tuning because ElastiCache has higher network latency than a co-located instance.
 
-### Phase 1: Cloud Foundation (Week 3-6)
+**Cutover.** Set DNS TTL to 60 seconds. Use Route 53 weighted records: 5% to cloud, hold a day or two, then 10%, 25%, 100%. At each step, check SLO compliance. The important thing: at low percentages, the two environments have independent order books. A buy order on cloud won't match against a sell on on-prem. That's acceptable at 5% because we're testing infrastructure, not liquidity. But at 50% the fragmentation becomes a real problem — so once past 25%, either commit to 100% or roll back to 0%. Don't sit at 50%.
 
-Deploy infrastructure without routing any production traffic.
+Rollback at any point: set cloud weight to 0%, DNS propagates in 60 seconds, on-prem never stopped running.
 
-**Actions:**
-- Apply `infrastructure/terraform/environments/production/main.tf` — provisions VPC, EKS, ElastiCache, monitoring.
-- Deploy orderbook to EKS via production Kustomize overlay. Verify health checks pass.
-- Deploy monitoring stack (Prometheus, Grafana, Tempo) in AWS. Both environments now have independent monitoring.
-- Set up CI/CD to deploy to EKS (the pipeline already produces signed images).
+**Decommission.** Keep on-prem in standby for two weeks. Then shut it down, keep the VPN for 30 days, update runbooks.
 
-**Exit criteria:** Cloud environment operational, health checks passing, monitoring live, no production traffic.
-
-### Phase 2: Shadow Traffic (Week 7-8)
-
-Validate against real traffic patterns without user impact.
-
-**Actions:**
-- Configure Istio traffic mirroring (`VirtualService.mirror`) to copy requests to AWS. Responses are discarded — users only see on-prem responses.
-- Compare environments: latency percentiles, error rates, response correctness (logged, not returned).
-- Fix cloud-specific issues: DNS resolution differences, clock skew (order timestamps use `time.Now().UTC()`), Redis pool tuning for higher-latency network.
-
-**What to watch for:**
-- Cloud latency significantly higher → investigate: AWS VPC routing, instance type (c6i.xlarge vs bare metal), ElastiCache network overhead.
-- Mirrored requests cause errors → fix before proceeding. Common: missing env vars, DNS behavior differences.
-
-**Exit criteria:** Cloud handles mirrored traffic at on-prem parity for latency and correctness.
-
-### Phase 3: Canary Cutover (Week 9-10)
-
-Gradually shift real production traffic.
-
-**Actions:**
-- Set DNS TTL to 60 seconds (temporary, enables fast rollback).
-- Weighted DNS routing (Route 53) or Istio traffic splitting: 5% → 10% → 25% → 50% → 100%.
-- At each stage: hold 24-48 hours, verify SLO compliance, error budget not accelerating, p99 within target.
-
-**Critical rule:** The matching engine runs in only one environment at a time. The traffic split controls which environment processes orders, not both simultaneously.
-
-- At 5% cloud: a small user cohort tests cloud reliability. The two environments have independent order books, so cross-matching does not occur. Acceptable because we are testing infrastructure, not liquidity.
-- At 50%+: liquidity split becomes a problem. Commit to 100% (if green) or fall back to 0%. Do not hold at 50%.
-
-**Rollback:** Set cloud traffic weight to 0%. DNS propagates within 60 seconds. On-prem continues serving.
-
-**Exit criteria:** 100% traffic on cloud for 48 hours with SLO compliance.
-
-### Phase 4: Decommission (Week 11-12)
-
-- Keep on-prem in standby for 2 weeks after full cutover.
-- Decommission on-prem instances. Keep VPN for 30 days as safety net.
-- Raise DNS TTL back to production values (300s+).
-- Update runbooks and incident response to reference cloud infrastructure.
-
----
-
-## Key Risks
-
-### Latency-Sensitive Systems
+## Latency
 
 | Path | On-prem | Cloud target | If exceeded |
 |------|---------|-------------|-------------|
-| App → Redis | < 0.5ms (co-located) | < 2ms (same-AZ ElastiCache) | Place pods + ElastiCache in same AZ; read replicas for reads |
-| Client → App | Varies | Should improve (AWS edge) | NLB or CloudFront for client traffic |
-| Pod → Pod | < 0.2ms (same rack) | < 1ms (same AZ, Istio mTLS) | Disable mTLS for intra-namespace if unacceptable (tradeoff: less security) |
+| App → Redis | < 0.5ms (co-located) | < 2ms (same-AZ ElastiCache) | Pin pods and ElastiCache to the same AZ |
+| Client → App | Varies | Should improve (AWS edge) | NLB for client traffic |
+| Pod → Pod | < 0.2ms (same rack) | < 1ms (same AZ, Istio mTLS) | Disable mTLS intra-namespace if unacceptable |
 
-### Data Consistency
+## Data Consistency
 
-The order book is in-memory. There is no shared state between on-prem and cloud. Consistency is maintained by the constraint that only one environment matches at a time.
+There's no shared state between environments. The order book is in-memory, Redis journals are environment-local. Consistency comes from the rule that only one environment matches at a time — not from replication.
 
-If active-active were required (geographic proximity for users in different regions), the architecture would need a consensus protocol (Raft) or CRDTs — a fundamentally different design, out of scope for this migration.
+If active-active were ever required (users in different continents needing local matching), the architecture would need Raft or CRDTs. That's a different system entirely.
 
-### Avoiding Two Control Planes
+## The Control Plane Problem
 
-The risk with hybrid infrastructure is two loosely coordinated systems for deployment, monitoring, and access control.
+The real risk with hybrid isn't the migration itself — it's ending up with two of everything. Two deploy pipelines, two monitoring stacks, two secret stores, and an on-call engineer checking two dashboards at 3am. Every time I've seen this happen, the "temporary" second system becomes permanent because nobody has time to consolidate.
 
-| Concern | Mitigation |
-|---------|-----------|
-| Divergent deployment tooling | Single Terraform repo (`infrastructure/terraform/`). Both environments defined with shared modules. Same PR review process. |
-| Separate CI/CD pipelines | Same GitHub Actions workflow. Deploy target controlled by branch/input, not separate pipelines. |
-| Split monitoring | Both push to one Prometheus/Grafana stack (or Thanos for multi-cluster). Alerts defined once. On-call sees one pane. |
-| Config drift in Kubernetes | Flux or ArgoCD reconciles Git state with both clusters. Drift detected automatically. |
-| Separate secret stores | Both pull from AWS Secrets Manager (cloud) or Vault (hybrid). |
+The fix is to refuse to build parallel systems from the start:
 
-If any of these becomes impractical (e.g., on-prem cannot reach Secrets Manager), that signals to accelerate the migration rather than build parallel infrastructure.
+- **One Terraform repo.** Both environments defined in `infrastructure/terraform/` with shared modules. Same PR process.
+- **One CI/CD pipeline.** Same GitHub Actions workflow, target environment is a parameter.
+- **One monitoring stack.** Both environments push to the same Prometheus (or Thanos for federation). Alerts defined once.
+- **One secret store.** AWS Secrets Manager or Vault. Not one per environment.
+- **One GitOps controller.** Flux or ArgoCD reconciling both clusters from the same repo.
 
----
+If any of these becomes impractical — say, the on-prem firewall blocks Secrets Manager — that's a signal to accelerate the migration, not to build a parallel secret store.
 
 ## Timeline
 
-| Week | Phase | Risk | Rollback |
-|------|-------|------|----------|
-| 1-2 | Assessment | None | N/A |
-| 3-6 | Foundation | Low (no traffic) | Destroy cloud infra |
-| 7-8 | Shadow traffic | Low (mirrored) | Disable mirror |
-| 9-10 | Canary cutover | Medium (split traffic) | < 60s via DNS weight |
-| 11-12 | Decommission | Low (cloud proven) | Restart on-prem standby |
+Roughly 10-12 weeks. Engineering effort concentrates in weeks 3-8 (infra setup and shadow validation). Cutover and decommission are mostly observation. The biggest schedule risk is Direct Connect provisioning — start it in week 1.

@@ -1,0 +1,119 @@
+# SLO-based alerting rules for the order book service.
+#
+# Uses multiwindow, multi-burn-rate approach (Google SRE Workbook, Ch. 5).
+# Fast burn pages immediately; slow burn creates a ticket.
+#
+# These require the Prometheus Operator CRD (PrometheusRule).
+# In KinD/local, Prometheus uses static scrape config so these
+# are not applied — they're here for production EKS with
+# kube-prometheus-stack.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: orderbook-slo
+  namespace: trading
+  labels:
+    app.kubernetes.io/name: orderbook
+    app.kubernetes.io/part-of: trading-platform
+    release: prometheus  # matches kube-prometheus-stack's ruleSelector
+spec:
+  groups:
+    # --- Availability SLO: 99.9% non-5xx over 30 days ---
+    - name: orderbook.availability
+      rules:
+        # Error ratio (reusable recording rule)
+        - record: orderbook:http_error_ratio:5m
+          expr: |
+            (
+              sum(rate(http_requests_total{path=~"/api/v1/.*", status=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{path=~"/api/v1/.*"}[5m]))
+            ) OR vector(0)
+
+        # Fast burn: 14.4x error rate over 1h — budget exhausted in ~2 days.
+        # Pages immediately.
+        - alert: OrderbookAvailabilityFastBurn
+          expr: |
+            (
+              sum(rate(http_requests_total{path=~"/api/v1/.*", status=~"5.."}[1h]))
+              /
+              sum(rate(http_requests_total{path=~"/api/v1/.*"}[1h]))
+            ) > (14.4 * 0.001)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Order book availability SLO fast burn"
+            description: "Error rate {{ $value | humanizePercentage }} over 1h exceeds 14.4x burn rate. 30-day budget will exhaust in ~2 days."
+            runbook: "Check deployment events, Redis health, and pod logs."
+
+        # Slow burn: 1x error rate over 3d — gradual degradation.
+        # Creates a ticket.
+        - alert: OrderbookAvailabilitySlowBurn
+          expr: |
+            (
+              sum(rate(http_requests_total{path=~"/api/v1/.*", status=~"5.."}[3d]))
+              /
+              sum(rate(http_requests_total{path=~"/api/v1/.*"}[3d]))
+            ) > (1.0 * 0.001)
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Order book availability SLO slow burn"
+            description: "Error rate {{ $value | humanizePercentage }} over 3d exceeds sustainable rate."
+
+    # --- Latency SLO: p99 < 50ms for POST /orders ---
+    - name: orderbook.latency
+      rules:
+        # Fast burn: p99 > 500ms for 5 min (10x target).
+        - alert: OrderbookLatencyFastBurn
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{method="POST", path="/api/v1/orders"}[5m])) by (le)
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Order placement p99 latency > 500ms"
+            description: "p99 latency is {{ $value }}s (target: 50ms). Something is fundamentally broken."
+
+        # Slow burn: p99 > 50ms sustained.
+        - alert: OrderbookLatencySlowBurn
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{method="POST", path="/api/v1/orders"}[30m])) by (le)
+            ) > 0.05
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Order placement p99 latency exceeds 50ms SLO"
+            description: "p99 latency is {{ $value }}s over 30m window."
+
+    # --- Operational alerts (not SLO-based) ---
+    - name: orderbook.operational
+      rules:
+        - alert: OrderbookHighRestartRate
+          expr: |
+            sum(increase(kube_pod_container_status_restarts_total{container="orderbook", namespace="trading"}[1h])) > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Orderbook pods restarting frequently"
+            description: "{{ $value }} restarts in the last hour. Investigate OOMKill or crash loops."
+
+        - alert: OrderbookHPAMaxedOut
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler="orderbook", namespace="trading"}
+            ==
+            kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler="orderbook", namespace="trading"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Orderbook HPA at maximum replicas"
+            description: "HPA has scaled to max and may still be saturated. Review traffic patterns or increase max."

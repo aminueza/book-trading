@@ -20,6 +20,8 @@
 .PHONY: up down validate validate-istio test build lint clean status logs pf restart loadtest chaos-node-failure chaos-drain _check-deps _check-go install-deps deps deps-info link-kubectl redis-cli redis-forward
 
 CLUSTER_NAME ?= orderbook-local
+# KinD local API: NodePort on host :8001 (Terraform extraPortMappings). Use LOADTEST_BASE=http://localhost:8080 with `make pf` for Istio.
+LOADTEST_BASE ?= http://127.0.0.1:8001
 # Host CPU → linux Go arch (KinD nodes usually match Docker host; avoids amd64 image on arm64 clusters).
 TARGETARCH ?= $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/' -e 's/arm64/arm64/')
 # Prefer OpenTofu; fall back to HashiCorp Terraform if installed from releases / another tap.
@@ -138,15 +140,22 @@ restart:
 	$(KUBECTL) rollout status deployment/orderbook -n trading --timeout=120s
 
 # ============================================================
-# Load testing (requires hey: go install github.com/rakyll/hey@latest)
+# Load testing (hey: installed via make install-deps / brew install hey)
 # ============================================================
 
 loadtest:
-	@echo "Sending 1000 POSTs (50 concurrent) — ensure 'make pf' is running..."
+	@set -e; \
+	PATH="/opt/homebrew/bin:/usr/local/bin:$$PATH"; \
+	command -v hey >/dev/null 2>&1 || { \
+	  echo "Error: hey not on PATH — brew install hey   or   make install-deps"; \
+	  exit 1; \
+	}; \
+	echo "Sending 1000 POSTs (50 concurrent) → $(LOADTEST_BASE)/api/v1/orders"; \
+	echo "  (default: KinD NodePort :8001; Istio: make pf in another terminal, then LOADTEST_BASE=http://127.0.0.1:8080 make loadtest)"; \
 	hey -n 1000 -c 50 -m POST \
 		-H "Content-Type: application/json" \
 		-d '{"pair":"BTC-USD","side":"buy","price":50000,"quantity":0.1}' \
-		http://localhost:8080/api/v1/orders
+		"$(LOADTEST_BASE)/api/v1/orders"
 	@echo ""
 	@echo "Grafana (KinD NodePort): http://127.0.0.1:3000"
 
@@ -197,18 +206,21 @@ deps-info:
 	@echo "Go (for \`make test\` / \`make lint\`):"
 	@echo "  https://go.dev/dl/   or   macOS: brew install go"
 	@echo ""
+	@echo "  hey (HTTP load gen for \`make loadtest\`)"
+	@echo "    macOS: brew install hey   (included in \`make install-deps\`)"
+	@echo "    Other: go install github.com/rakyll/hey@latest  (add GOPATH/bin to PATH)"
+	@echo ""
 	@echo "Optional:"
 	@echo "  golangci-lint — \`make lint\`  https://golangci-lint.run/welcome/install/"
-	@echo "  hey — \`make loadtest\`         go install github.com/rakyll/hey@latest"
 
-## macOS + Homebrew: kind, kubectl, helm, opentofu (Docker: Docker Desktop separately)
+## macOS + Homebrew: kind, kubectl, helm, opentofu, hey (Docker: Docker Desktop separately)
 install-deps:
 	@set -e; \
 	case "$$(uname -s)" in \
 	Darwin) \
 	  command -v brew >/dev/null 2>&1 || { echo "Homebrew not found. https://brew.sh — or: make deps-info"; exit 1; }; \
-	  echo "Installing kind, kubernetes-cli (kubectl), helm, opentofu via Homebrew..."; \
-	  brew install kind kubernetes-cli helm opentofu; \
+	  echo "Installing kind, kubernetes-cli (kubectl), helm, opentofu, hey via Homebrew..."; \
+	  brew install kind kubernetes-cli helm opentofu hey; \
 	  echo "Linking kubectl into PATH (fixes 'installed but not linked')..."; \
 	  brew link --overwrite kubernetes-cli; \
 	  echo ""; \

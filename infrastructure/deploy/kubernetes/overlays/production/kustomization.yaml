@@ -5,6 +5,7 @@ namespace: trading
 
 resources:
   - ../../base
+  - ../../base/prometheusrule.yaml
 
 # Production image — pinned to a specific digest in real deployments.
 images:

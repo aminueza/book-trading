@@ -1,144 +1,98 @@
 # CI/CD and Production Safety
 
-How the order book service is built, validated, and deployed to production with automated safety controls.
-
----
-
 ## Pipeline Architecture
 
-Two independent workflows, separated by concern:
+Two workflows, split by concern:
 
-![CI Pipelines: infrastructure (security scan, plan, apply) and application (lint, test, security, build, rollout with health verification)](images/ci-pipelines-diagram.svg)
+![CI Pipelines](images/ci-pipelines-diagram.svg)
 
-**Infrastructure first, application second.** If both change, merge the infra PR first. The application deploy assumes the cluster already exists.
+**`ci-infrastructure.yml`** triggers on `infrastructure/terraform/**` changes. Manages VPC, EKS, ElastiCache, monitoring.
 
-### ci-infrastructure.yml
+![Infrastructure pipeline](images/infra-pipeline.svg)
 
-Triggered by changes to `infrastructure/terraform/**`. Manages VPC, EKS, ElastiCache, monitoring.
+**`ci-application.yml`** triggers on `application/**`, `Dockerfile`, `go.mod` changes. Builds and deploys the orderbook service.
 
-![Infrastructure pipeline: security scan, plan, apply](images/infra-pipeline.svg)
+![Application pipeline](images/app-pipeline.svg)
 
-### ci-application.yml
-
-Triggered by changes to `application/**`, `Dockerfile`, `go.mod`. Builds and deploys the orderbook service.
-
-![Application pipeline: lint + test + security, build, rollout](images/app-pipeline.svg)
-
----
+Infrastructure deploys first. If both change in the same PR cycle, merge infra first. The app deploy assumes the cluster exists.
 
 ## Reusable Actions
 
-All CI/CD logic is extracted into composite actions under `.github/workflows/actions/`:
+All CI logic lives in composite actions under `.github/workflows/actions/`:
 
-| Action | Purpose |
-|--------|---------|
-| `lint` | gofmt, go vet, golangci-lint, gosec (SAST), govulncheck |
-| `build` | Docker BuildKit, multi-arch, tag generation, Cosign signing, SBOM, provenance |
-| `security` | Trivy container vulnerability scanning with SARIF upload |
-| `infra-security` | tfsec (Terraform misconfigs), checkov (CIS benchmarks), conftest (custom OPA policies) |
-| `deploy` | Terraform fmt, init, validate, plan, apply with AWS OIDC federation |
-| `rollout` | Kustomize apply, rollout wait, readiness, liveness, smoke test, rollback, Slack notify |
-
----
+| Action | What it does |
+|--------|-------------|
+| `lint` | gofmt, go vet, golangci-lint, gosec, govulncheck |
+| `build` | Docker BuildKit, Cosign signing, SBOM (SPDX), SLSA provenance |
+| `security` | Trivy container CVE scan with SARIF upload |
+| `infra-security` | tfsec, checkov, optional conftest (OPA policies) |
+| `deploy` | Terraform fmt/init/validate/plan/apply, AWS OIDC |
+| `rollout` | Kustomize apply, rollout wait, readiness + liveness + smoke test, auto-rollback, Slack notify |
 
 ## Security Gates
 
-Every change passes through multiple security layers before reaching production:
+### Application
 
-### Application Code
+gosec does SAST (hardcoded credentials, injection patterns). govulncheck checks Go dependencies against the vulnerability database. Trivy scans the built container image for OS and binary CVEs. Cosign signs the image so we can verify it hasn't been tampered with after build. Every image also gets an SPDX SBOM and SLSA provenance attestation attached as registry attestations.
 
-| Scanner | What It Catches | Stage |
-|---------|----------------|-------|
-| gosec | SAST: hardcoded credentials, SQL injection patterns, weak crypto | `lint` job |
-| govulncheck | Known vulnerabilities in Go dependencies | `lint` job |
-| Trivy | CVEs in the container image (OS packages, Go binary) | `security` job |
-| Cosign | Image signing — tamper detection after build | `build` job |
-| SBOM (SPDX) | Software Bill of Materials — full inventory of packages and dependencies in the image, attached as a registry attestation. Enables post-build vulnerability scanning and audit trail for compliance. | `build` job |
-| SLSA Provenance | Attestation of how and where the image was built (source repo, commit, builder identity). Establishes a verifiable chain from source to artifact. | `build` job |
+### Infrastructure
 
-### Infrastructure Code
+tfsec catches Terraform misconfigs (open security groups, public buckets, disabled encryption, overly permissive IAM). checkov runs CIS benchmarks. Both analyze the HCL files statically, no cloud credentials needed. Problems show up during code review, not after apply.
 
-| Scanner | What It Catches | Blocking |
-|---------|----------------|----------|
-| tfsec | Open security groups, public S3 buckets, disabled encryption, overly permissive IAM | Yes |
-| checkov | CIS benchmark compliance for AWS resources | No (advisory) |
-| conftest | Custom OPA/Rego policy rules (optional, via policy directory) | Yes, if configured |
+## How a Deploy Works
 
-These run statically against the HCL files — no cloud credentials needed. Security issues are caught during code review, not after the infrastructure is live.
+The rollout action pins the kustomize overlay to the exact image digest from the build step. Tags are mutable, digests are not.
 
----
+It applies with `kubectl apply --server-side --field-manager=ci-deploy` which tracks field ownership between CI and manual changes.
 
-## Deployment Safety
+The Deployment is configured with `maxSurge=1, maxUnavailable=0`. Kubernetes creates one new pod, waits for readiness, terminates one old pod. Repeat until done. No requests hit a terminating pod.
 
-### How a Deploy Works
+After the rollout completes, the pipeline runs three checks:
 
-1. **Image pinning** — kustomize overlay is patched with the exact image digest (`sha256:...`) from the build step. Tags are mutable; digests are not.
+**Readiness.** Port-forwards to every pod, hits `/readyz`. This checks Redis connectivity and application state. One failure triggers rollback.
 
-2. **Server-side apply** — `kubectl apply --server-side --field-manager=ci-deploy` tracks which fields are owned by CI vs manual changes. Prevents accidental overwrites.
+**Liveness.** Hits `/healthz` to confirm the process is alive, not just ready.
 
-3. **Rolling update** — the Deployment uses `maxSurge=1, maxUnavailable=0`. Kubernetes creates one new pod, waits for it to pass readiness, then terminates one old pod. No requests hit a terminating pod.
+**Smoke test.** Places a real order via `POST /api/v1/orders` and cancels it. Validates the full path: JSON parsing, validation, matching engine, Redis persistence, cache invalidation, response serialization. If any of these are broken, we know before users do.
 
-4. **Readiness verification** — after the rollout completes, the pipeline port-forwards to every pod and hits `/readyz`. This endpoint checks Redis connectivity and application state. If any pod fails, the deploy is rolled back.
+If any check fails, `kubectl rollout undo` restores the previous revision and Slack gets notified.
 
-5. **Liveness verification** — hits `/healthz` to confirm the process is alive (not just ready).
+## What Prevents Bad Deploys
 
-6. **Smoke test** — places a real order (`POST /api/v1/orders`) and cancels it. This validates the full request path: JSON parsing, input validation, matching engine, Redis persistence, cache invalidation, response serialization.
+Manual approval via GitHub Environment `production` with required reviewers. No one can push to production without sign-off.
 
-7. **Automatic rollback** — if any step (3-6) fails, `kubectl rollout undo` restores the previous revision. The on-call engineer is notified via Slack.
+Concurrency group `deploy-production` ensures only one deploy runs at a time. A second push queues instead of running in parallel.
 
-### What Prevents Bad Deploys
+New PR pushes cancel in-progress CI for that branch so we don't waste runner time on superseded commits.
 
-| Control | How It Works |
-|---------|-------------|
-| Manual approval gate | GitHub Environment `production` requires reviewer approval before the deploy job runs |
-| Serialized deploys | Concurrency group `deploy-production` — a second deploy queues, never runs in parallel |
-| Cancel stale CI | New PR push cancels in-progress CI for that branch — no wasted runners |
-| Credential isolation | AWS OIDC federation — no long-lived access keys in GitHub Secrets |
-| Revision history | `revisionHistoryLimit: 5` in the Deployment — rollback to any of the last 5 revisions |
-| `minReadySeconds: 10` | New pods must stay healthy for 10 seconds before the rollout progresses |
+AWS OIDC federation for credentials. No long-lived access keys in GitHub Secrets. Session tokens expire in about an hour.
 
-### Rollback
+`revisionHistoryLimit: 5` keeps the last five revisions. `minReadySeconds: 10` means a pod must stay healthy for 10 seconds before the rollout progresses, which catches the startup race conditions that crash-loop after initial readiness.
 
-Rollback is automatic on verification failure. For manual rollback:
+## Rollback
+
+Automatic on any verification failure. Manual when needed:
 
 ```bash
-# Roll back to the previous revision
 kubectl rollout undo deployment/orderbook -n trading
-
-# Roll back to a specific revision
 kubectl rollout undo deployment/orderbook -n trading --to-revision=3
-
-# Check rollout history
 kubectl rollout history deployment/orderbook -n trading
 ```
 
----
+## Branching Model
 
-## Branching and Promotion Model
+![Branching model](images/branching-model.svg)
 
-![Branching model: feature branch to PR to merge, deploy with approval gate, pass/fail with rollback](images/branching-model.svg)
+Trunk-based: short-lived feature branches, merge to main. No long-lived develop or release branches. The `develop` branch in the CI trigger exists for teams that want it, but deploys only run on `main`.
 
-- **Trunk-based development**: short-lived feature branches, merge to main.
-- **No staging environment in this implementation**: production is gated by the approval step and post-deploy verification. A staging environment would be added by creating `infrastructure/terraform/environments/staging/` and a second deploy job targeting it (the Terraform modules and kustomize overlays are already parameterized for this).
-- **No long-lived develop/release branches**: the `develop` branch in the CI trigger exists for teams that use it, but the deploy job only runs on `main`.
+No staging environment in this implementation. Production is gated by manual approval and post-deploy verification. Adding staging means creating `infrastructure/terraform/environments/staging/` and a second deploy job. The modules and overlays already support it.
 
----
+## Secrets
 
-## Secrets Flow
+![Secrets flow](images/secrets-flow.svg)
 
-![Secrets flow: GitHub Secrets to AWS OIDC to EKS, Kubernetes Secrets to pod environment](images/secrets-flow.svg)
+CI never touches the Redis password. It's injected into pods via Kubernetes Secrets. AWS credentials are ephemeral OIDC tokens. Nothing is logged, echoed, or written to disk.
 
-- CI never sees the Redis password — it is injected into pods via Kubernetes Secrets.
-- AWS credentials are ephemeral (OIDC session tokens, ~1 hour TTL).
-- No secrets are logged, echoed, or written to disk during CI.
+## Partial Deploys
 
----
-
-## What Happens If a Deploy Partially Succeeds
-
-The rolling update strategy means partial success is visible as a mixed-revision deployment:
-
-- Some pods run the new version (passed readiness), some still run the old version.
-- If the pipeline fails at the health check step, `kubectl rollout undo` reverts all pods to the previous revision.
-- If the pipeline runner crashes mid-deploy (GitHub Actions outage), Kubernetes continues the rollout independently. The next CI run will detect the state via `kubectl rollout status` and either verify or roll back.
-- The `minReadySeconds: 10` window ensures that a pod that crashes immediately after becoming ready (e.g., a startup race condition) is caught before the rollout progresses.
+If the pipeline fails mid-rollout, some pods run the new version and some run the old. `kubectl rollout undo` reverts everything. If the GitHub Actions runner itself crashes, Kubernetes continues the rollout independently. The next CI run detects the state and either verifies or rolls back.

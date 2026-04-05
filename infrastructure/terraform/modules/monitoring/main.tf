@@ -10,10 +10,73 @@ terraform {
   }
 }
 
+# --- KMS key for monitoring resources ---
+# Single key for log groups and SNS topics in this module.
+resource "aws_kms_key" "monitoring" {
+  description             = "Encryption key for ${var.environment} monitoring (logs + SNS)"
+  deletion_window_in_days = 14
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowAccountRoot"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowCloudWatchLogs"
+        Effect = "Allow"
+        Principal = {
+          Service = "logs.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowSNS"
+        Effect = "Allow"
+        Principal = {
+          Service = "sns.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = merge(var.tags, {
+    Name = "${var.environment}-monitoring-kms"
+  })
+}
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_kms_alias" "monitoring" {
+  name          = "alias/${var.environment}-monitoring"
+  target_key_id = aws_kms_key.monitoring.key_id
+}
+
 # --- Log Groups ---
 resource "aws_cloudwatch_log_group" "application" {
   name              = "/trading/${var.environment}/application"
   retention_in_days = var.log_retention_days
+  kms_key_id        = aws_kms_key.monitoring.arn
 
   tags = merge(var.tags, {
     Name = "${var.environment}-application-logs"
@@ -23,6 +86,7 @@ resource "aws_cloudwatch_log_group" "application" {
 resource "aws_cloudwatch_log_group" "eks_audit" {
   name              = "/aws/eks/${var.cluster_name}/cluster"
   retention_in_days = var.log_retention_days
+  kms_key_id        = aws_kms_key.monitoring.arn
 
   tags = merge(var.tags, {
     Name = "${var.environment}-eks-audit-logs"
@@ -32,8 +96,9 @@ resource "aws_cloudwatch_log_group" "eks_audit" {
 # --- SNS Topics ---
 # Critical: routes to PagerDuty for immediate response.
 resource "aws_sns_topic" "critical_alerts" {
-  name = "${var.environment}-critical-alerts"
-  tags = var.tags
+  name              = "${var.environment}-critical-alerts"
+  kms_master_key_id = aws_kms_key.monitoring.id
+  tags              = var.tags
 }
 
 resource "aws_sns_topic_subscription" "pagerduty" {
@@ -45,8 +110,9 @@ resource "aws_sns_topic_subscription" "pagerduty" {
 
 # Warning: routes to Slack for awareness, no pager.
 resource "aws_sns_topic" "warning_alerts" {
-  name = "${var.environment}-warning-alerts"
-  tags = var.tags
+  name              = "${var.environment}-warning-alerts"
+  kms_master_key_id = aws_kms_key.monitoring.id
+  tags              = var.tags
 }
 
 resource "aws_sns_topic_subscription" "slack" {
