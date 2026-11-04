@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -12,7 +13,7 @@ func TestHealthz(t *testing.T) {
 	h, mr, rdb := testRouter(t)
 	t.Cleanup(func() { _ = rdb.Close(); mr.Close() })
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -32,7 +33,7 @@ func TestReadyz(t *testing.T) {
 	h, mr, rdb := testRouter(t)
 	t.Cleanup(func() { _ = rdb.Close(); mr.Close() })
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -45,7 +46,7 @@ func TestPlaceOrderValidation(t *testing.T) {
 	h, mr, rdb := testRouter(t)
 	t.Cleanup(func() { _ = rdb.Close(); mr.Close() })
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(`{"pair":"","side":"buy","price":1,"quantity":1}`))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/orders", bytes.NewBufferString(`{"pair":"","side":"buy","price":1,"quantity":1}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -61,7 +62,7 @@ func TestPlaceOrderAndOrderbook(t *testing.T) {
 
 	pair := "TEST-USD"
 
-	sell := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
+	sell := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"sell","price":100,"quantity":2}`,
 	))
 	sell.Header.Set("Content-Type", "application/json")
@@ -71,7 +72,7 @@ func TestPlaceOrderAndOrderbook(t *testing.T) {
 		t.Fatalf("sell: %d %s", recSell.Code, recSell.Body.String())
 	}
 
-	buy := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
+	buy := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"buy","price":100,"quantity":0.5}`,
 	))
 	buy.Header.Set("Content-Type", "application/json")
@@ -81,7 +82,7 @@ func TestPlaceOrderAndOrderbook(t *testing.T) {
 		t.Fatalf("buy: %d %s", recBuy.Code, recBuy.Body.String())
 	}
 
-	ob := httptest.NewRequest(http.MethodGet, "/api/v1/orderbook/"+pair+"?depth=5", nil)
+	ob := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/orderbook/"+pair+"?depth=5", nil)
 	recOB := httptest.NewRecorder()
 	h.ServeHTTP(recOB, ob)
 	if recOB.Code != http.StatusOK {
@@ -104,7 +105,7 @@ func TestCancelOrder(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close(); mr.Close() })
 
 	pair := "CAN-USD"
-	place := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
+	place := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"buy","price":10,"quantity":1}`,
 	))
 	place.Header.Set("Content-Type", "application/json")
@@ -128,7 +129,7 @@ func TestCancelOrder(t *testing.T) {
 		t.Fatal("missing order id")
 	}
 
-	del := httptest.NewRequest(http.MethodDelete, "/api/v1/orders/"+id+"?pair="+pair, nil)
+	del := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/v1/orders/"+id+"?pair="+pair, nil)
 	recD := httptest.NewRecorder()
 	h.ServeHTTP(recD, del)
 	if recD.Code != http.StatusOK {
@@ -141,22 +142,67 @@ func TestTradesEndpoint(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close(); mr.Close() })
 
 	pair := "TRD-USD"
-	sell := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
+	sell := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"sell","price":50,"quantity":1}`,
 	))
 	sell.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(httptest.NewRecorder(), sell)
 
-	buy := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
+	buy := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/orders", bytes.NewBufferString(
 		`{"pair":"`+pair+`","side":"buy","price":50,"quantity":1}`,
 	))
 	buy.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(httptest.NewRecorder(), buy)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/trades/"+pair+"?limit=10", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/trades/"+pair+"?limit=10", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("trades: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOrderbookServedFromCache(t *testing.T) {
+	h, mr, rdb := testRouter(t)
+	t.Cleanup(func() { _ = rdb.Close(); mr.Close() })
+
+	pair := "CACHE-USD"
+	first := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/orderbook/"+pair, nil)
+	recFirst := httptest.NewRecorder()
+	h.ServeHTTP(recFirst, first)
+	if recFirst.Code != http.StatusOK {
+		t.Fatalf("first: %d %s", recFirst.Code, recFirst.Body.String())
+	}
+	if got := recFirst.Header().Get("X-Cache"); got == "HIT" {
+		t.Fatalf("first request unexpectedly served from cache")
+	}
+
+	second := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/orderbook/"+pair, nil)
+	recSecond := httptest.NewRecorder()
+	h.ServeHTTP(recSecond, second)
+	if recSecond.Code != http.StatusOK {
+		t.Fatalf("second: %d %s", recSecond.Code, recSecond.Body.String())
+	}
+	if got := recSecond.Header().Get("X-Cache"); got != "HIT" {
+		t.Fatalf("expected X-Cache HIT, got %q", got)
+	}
+	if got := recSecond.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected application/json, got %q", got)
+	}
+	var firstWrap, secondWrap struct {
+		Success bool           `json:"success"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(recFirst.Body.Bytes(), &firstWrap); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(recSecond.Body.Bytes(), &secondWrap); err != nil {
+		t.Fatal(err)
+	}
+	if !secondWrap.Success {
+		t.Fatalf("cached response success false: %s", recSecond.Body.String())
+	}
+	if !reflect.DeepEqual(firstWrap.Data, secondWrap.Data) {
+		t.Fatalf("cached data differs:\n%v\n%v", firstWrap.Data, secondWrap.Data)
 	}
 }

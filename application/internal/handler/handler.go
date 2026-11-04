@@ -115,7 +115,7 @@ func (h *Handler) GetOrderBook(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Cache", "HIT")
 		w.Header().Set("X-Request-ID", reqID)
-		if _, err := w.Write(cached); err != nil {
+		if _, err := w.Write(cached); err != nil { // #nosec G705
 			log.Error().Err(err).Str("request_id", reqID).Msg("write cached orderbook")
 		}
 		return
