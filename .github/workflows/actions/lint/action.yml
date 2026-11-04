@@ -11,17 +11,17 @@ inputs:
     required: false
     default: "true"
   go-version:
-    description: "Go version (e.g. 1.24.x)"
+    description: "Go version override (e.g. 1.25.x); empty uses the go directive from go.mod"
     required: false
-    default: "1.24"
+    default: ""
   go-working-directory:
     description: "Directory containing go.mod"
     required: false
     default: "."
   golangci-lint-version:
-    description: "golangci-lint release tag (use 'latest' to match default CI)"
+    description: "golangci-lint release tag (v2.x; use 'latest' to match default CI)"
     required: false
-    default: "latest"
+    default: "v2.15.0"
   golangci-args:
     description: "Extra arguments for golangci-lint run"
     required: false
@@ -39,9 +39,9 @@ inputs:
     required: false
     default: "true"
   gosec-version:
-    description: "gosec module version tag (e.g. v2.22.2) or latest"
+    description: "gosec module version tag (e.g. v2.30.0) or latest"
     required: false
-    default: "v2.22.2"
+    default: "v2.30.0"
   gosec-args:
     description: "Extra gosec arguments before ./..."
     required: false
@@ -73,6 +73,7 @@ runs:
       uses: actions/setup-go@v5
       with:
         go-version: ${{ inputs.go-version }}
+        go-version-file: ${{ inputs.go-working-directory }}/go.mod
         cache-dependency-path: ${{ inputs.go-working-directory }}/go.sum
 
     - name: "Download Go modules"
@@ -105,7 +106,7 @@ runs:
 
     - name: "golangci-lint"
       id: golang-lint
-      uses: golangci/golangci-lint-action@v4
+      uses: golangci/golangci-lint-action@v9
       with:
         version: ${{ inputs.golangci-lint-version }}
         working-directory: ${{ inputs.go-working-directory }}
